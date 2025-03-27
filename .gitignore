@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+database.db
+bot.log
+__pycache__/
+*.pyc
 
 # C extensions
 *.so
