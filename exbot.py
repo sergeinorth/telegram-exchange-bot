@@ -99,19 +99,26 @@ async def start(update, context):
     reply_markup = build_client_menu(user_id)
     logger.info("Отправка приветственного сообщения")
 
-    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=5):
+    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=3, timeout=10):
         for attempt in range(retries):
             try:
-                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
-                logger.info(f"Сообщение успешно отправлено в чат {chat_id}")
+                await asyncio.wait_for(
+                    context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup),
+                    timeout=timeout
+                )
+                logger.info(f"Сообщение успешно отправлено в чат {chat_id} с попытки {attempt + 1}")
                 return True
+            except asyncio.TimeoutError:
+                logger.warning(f"Тайм-аут при отправке сообщения в чат {chat_id}, попытка {attempt + 1} из {retries}")
             except telegram.error.TimedOut as e:
-                logger.warning(f"Попытка {attempt + 1} из {retries} не удалась: {str(e)}")
-                if attempt == retries - 1:
-                    raise
-                await asyncio.sleep(5)
+                logger.warning(f"Telegram TimedOut в чат {chat_id}, попытка {attempt + 1} из {retries}: {str(e)}")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке сообщения в чат {chat_id}: {str(e)}")
+                break
+            if attempt < retries - 1:
+                await asyncio.sleep(2)  # Пауза между попытками
+        logger.error(f"Не удалось отправить сообщение в чат {chat_id} после {retries} попыток")
         return False
-
     try:
         if active_order or referrer_id:
             await send_message_with_retry(
@@ -137,9 +144,27 @@ async def choose_operation(update, context):
     logger.info("Начало обработки выбора операции")
     user_id = update.message.from_user.id
     
+    # Проверяем, находится ли пользователь в админке
     if context.user_data.get('in_admin_mode', False):
-        logger.info(f"Пользователь {user_id} в админке, передаём управление")
-        return ADMIN_STATE
+        logger.info(f"Пользователь {user_id} уже в админке")
+        choice = update.message.text
+        from ex_admin import build_main_menu  # Локальный импорт
+        if choice == "Админка":
+            # Пользователь уже в админке и нажал "Админка"
+            reply_markup = build_main_menu(user_id)
+            await update.message.reply_text(
+                "Вы уже в админке! Выберите раздел:",
+                reply_markup=reply_markup
+            )
+            return ADMIN_STATE
+        else:
+            # Пользователь в админке и выбрал пару или другую опцию
+            reply_markup = build_main_menu(user_id)
+            await update.message.reply_text(
+                "Сначала выйдите из меню админа!",
+                reply_markup=reply_markup
+            )
+            return ADMIN_STATE
 
     choice = update.message.text
     logger.info(f"Выбор пользователя: {choice}")
@@ -148,17 +173,25 @@ async def choose_operation(update, context):
     admin_id = referrer_id if referrer_id else bot_config["owner_id"]
     admin_data = get_admin_data(admin_id)
 
-    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=5):
+    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=3, timeout=10):
         for attempt in range(retries):
             try:
-                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
-                logger.info(f"Сообщение успешно отправлено в чат {chat_id}")
+                await asyncio.wait_for(
+                    context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup),
+                    timeout=timeout
+                )
+                logger.info(f"Сообщение успешно отправлено в чат {chat_id} с попытки {attempt + 1}")
                 return True
+            except asyncio.TimeoutError:
+                logger.warning(f"Тайм-аут при отправке сообщения в чат {chat_id}, попытка {attempt + 1} из {retries}")
             except telegram.error.TimedOut as e:
-                logger.warning(f"Попытка {attempt + 1} из {retries} не удалась: {str(e)}")
-                if attempt == retries - 1:
-                    raise
-                await asyncio.sleep(5)
+                logger.warning(f"Telegram TimedOut в чат {chat_id}, попытка {attempt + 1} из {retries}: {str(e)}")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке сообщения в чат {chat_id}: {str(e)}")
+                break
+            if attempt < retries - 1:
+                await asyncio.sleep(2)  # Пауза между попытками
+        logger.error(f"Не удалось отправить сообщение в чат {chat_id} после {retries} попыток")
         return False
 
     if (str(user_id) == bot_config["owner_id"] or (get_user_data(user_id)[0] and 'admin_expiry' in json.loads(get_user_data(user_id)[0]))) and choice == "Админка":
@@ -250,10 +283,22 @@ async def get_amount(update, context):
             "usdt": "USDT"
         }
         currency_root = currency_corrections.get(currency_base, currency_base)
-        if currency_root in ["usdt"]:
-            currency = currency_root.upper()
+        if currency_root == "usdt":
+            currency = "USDT"
         else:
-            currency = numeral.choose_plural(int(result), (currency_root, currency_root + 'а', currency_root + 'ов'))
+            # Исправляем склонение для каждой валюты
+            if currency_root == "рубль":
+                currency = numeral.choose_plural(int(result), ("рубль", "рубля", "рублей"))
+            elif currency_root == "рупия":
+                currency = numeral.choose_plural(int(result), ("рупия", "рупии", "рупий"))
+            elif currency_root == "донг":
+                currency = numeral.choose_plural(int(result), ("донг", "донга", "донгов"))
+            elif currency_root == "юань":
+                currency = numeral.choose_plural(int(result), ("юань", "юаня", "юаней"))
+            elif currency_root == "бат":
+                currency = numeral.choose_plural(int(result), ("бат", "бата", "батов"))
+            else:
+                currency = currency_root  # Если валюта неизвестна, оставляем как есть
 
         reply_markup = build_location_menu(user_id)
         await update.message.reply_text(
@@ -300,11 +345,7 @@ async def get_fine_location(update, context):
     location = context.user_data['user_data']['location']
 
     if not check_request_limit(user_id):
-        message_text = (
-            bot_config["messages"]["limit_exceeded"].format(limit=bot_config["request_limit"])
-            if str(user_id) != bot_config["owner_id"]
-            else bot_config["messages"]["limit_exceeded_owner"].format(limit=bot_config["request_limit"])
-        )
+        message_text = bot_config["messages"]["limit_exceeded"].format(limit=bot_config["request_limit"])
         await update.message.reply_text(message_text)
         reply_markup = build_client_menu(user_id)
         await update.message.reply_text("Выберите операцию:", reply_markup=reply_markup)
@@ -319,10 +360,10 @@ async def get_fine_location(update, context):
     elif update.message.text == "Пропустить":
         fine_location = "Не указано"
     elif update.message.text == "Назад":
-        currency = bot_config["currencies"].get(context.user_data['user_data']['operation'], "unknown")
+        currency = bot_config["currencies"].get(operation, "unknown")
         reply_markup = build_location_menu(user_id)
         await update.message.reply_text(
-            bot_config["messages"]["location_prompt"].format(result=context.user_data['user_data']['result'], currency=currency),
+            bot_config["messages"]["location_prompt"].format(result=result, currency=currency),
             reply_markup=reply_markup
         )
         return LOCATION
@@ -340,27 +381,47 @@ async def get_fine_location(update, context):
         'location': location,
         'fine_location': fine_location
     }
-    save_user_data(user_id, active_order)
-    log_request(user_id)
 
-    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=5):
+    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=3, timeout=10):
         for attempt in range(retries):
             try:
-                await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup)
-                logger.info(f"Сообщение успешно отправлено в чат {chat_id}")
+                await asyncio.wait_for(
+                    context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup),
+                    timeout=timeout
+                )
+                logger.info(f"Сообщение успешно отправлено в чат {chat_id} с попытки {attempt + 1}")
                 return True
+            except asyncio.TimeoutError:
+                logger.warning(f"Тайм-аут при отправке сообщения в чат {chat_id}, попытка {attempt + 1} из {retries}")
             except telegram.error.TimedOut as e:
-                logger.warning(f"Попытка {attempt + 1} из {retries} не удалась: {str(e)}")
-                if attempt == retries - 1:
-                    raise
-                await asyncio.sleep(5)
+                logger.warning(f"Telegram TimedOut в чат {chat_id}, попытка {attempt + 1} из {retries}: {str(e)}")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке сообщения в чат {chat_id}: {str(e)}")
+                break
+            if attempt < retries - 1:
+                await asyncio.sleep(2)  # Пауза между попытками
+        logger.error(f"Не удалось отправить сообщение в чат {chat_id} после {retries} попыток")
         return False
 
     try:
-        # Форматируем сумму с разделителями и без копеек
+        save_user_data(user_id, active_order)
+        log_request(user_id)
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении данных заявки для user_id={user_id}: {str(e)}")
+        await send_message_with_retry(
+            chat_id=user_id,
+            text="Ошибка при сохранении заявки. Попробуй снова или обратись в поддержку.",
+            reply_markup=build_client_menu(user_id)
+        )
+        await send_message_with_retry(
+            chat_id=bot_config["owner_id"],
+            text=f"Ошибка сохранения заявки от user_id={user_id}: {str(e)}"
+        )
+        return CHOOSING
+
+    try:
+        # Форматируем сумму
         formatted_result = "{:,}".format(int(result)).replace(",", ".")
-        
-        # Определяем валюту
         currency_raw = operation.split('→')[1].strip() if '→' in operation else "unknown"
         currency_base = currency_raw.split()[0].lower()
         currency_corrections = {
@@ -372,63 +433,83 @@ async def get_fine_location(update, context):
             "usdt": "USDT"
         }
         currency_root = currency_corrections.get(currency_base, currency_base)
-        if currency_root in ["usdt"]:
-            currency = currency_root.upper()
+        if currency_root == "usdt":
+            currency = "USDT"
         else:
-            currency = numeral.choose_plural(int(result), (currency_root, currency_root + 'а', currency_root + 'ов'))
+            # Исправляем склонение для каждой валюты
+            if currency_root == "рубль":
+                currency = numeral.choose_plural(int(result), ("рубль", "рубля", "рублей"))
+            elif currency_root == "рупия":
+                currency = numeral.choose_plural(int(result), ("рупия", "рупии", "рупий"))
+            elif currency_root == "донг":
+                currency = numeral.choose_plural(int(result), ("донг", "донга", "донгов"))
+            elif currency_root == "юань":
+                currency = numeral.choose_plural(int(result), ("юань", "юаня", "юаней"))
+            elif currency_root == "бат":
+                currency = numeral.choose_plural(int(result), ("бат", "бата", "батов"))
+            else:
+                currency = currency_root
 
+        # Отправляем подтверждение пользователю
         reply_markup = build_client_menu(user_id)
-        await send_message_with_retry(
-            chat_id=user_id,
-            text=bot_config["messages"]["request_accepted"].format(
-                operation=operation,
-                amount=amount,
-                result=formatted_result,  # Используем отформатированную сумму
-                currency=currency,       # Используем правильную валюту
-                location=location,
-                fine_location=fine_location
-            ),
-            reply_markup=reply_markup
+        # Исправляем шаблон, убираем .2f, так как result уже отформатирован
+        user_message = bot_config["messages"]["request_accepted"].replace("{result:.2f}", "{result}").format(
+            operation=operation,
+            amount=amount,
+            result=formatted_result,
+            currency=currency,
+            location=location,
+            fine_location=fine_location
         )
+        if not await send_message_with_retry(
+            chat_id=user_id,
+            text=user_message,
+            reply_markup=reply_markup
+        ):
+            logger.warning(f"Не удалось отправить подтверждение пользователю {user_id}")
 
+        # Формируем и отправляем уведомление админу
         active_order_data, _, referrer_id = get_user_data(user_id)
         admin_chat_id = str(referrer_id) if referrer_id else bot_config["owner_id"]
+        user = update.message.from_user
+        user_link = f"@{user.username}" if user.username else f"[Пользователь](tg://user?id={user_id})"
 
         def escape_md(text):
             special_chars = r'_*[]()~`>#+-=|{}.!'
-            for char in special_chars:
-                text = text.replace(char, f"\\{char}")
-            return text
-
-        user = update.message.from_user
-        if user.username:
-            user_link = f"@{escape_md(user.username)}"
-        else:
-            user_link = f"[Пользователь](tg://user?id={user_id})"
+            return ''.join(f"\\{char}" if char in special_chars else char for char in str(text))
 
         admin_message = bot_config["messages"]["admin_request"].format(
-            user_link=user_link,
+            user_link=escape_md(user_link),
             operation=escape_md(operation),
             amount=escape_md(str(amount)),
-            result=escape_md(f"{formatted_result} {currency}"),  # Форматируем для админа
+            result=escape_md(f"{formatted_result} {currency}"),
             location=escape_md(location),
             fine_location=escape_md(fine_location)
         )
 
-        await send_message_with_retry(
+        if not await send_message_with_retry(
             chat_id=admin_chat_id,
             text=admin_message,
             parse_mode='MarkdownV2'
-        )
+        ):
+            logger.error(f"Не удалось отправить уведомление админу {admin_chat_id}")
+            await send_message_with_retry(
+                chat_id=bot_config["owner_id"],
+                text=f"Не удалось уведомить админа {admin_chat_id} о заявке от {user_link}"
+            )
+        else:
+            logger.info(f"Уведомление о заявке успешно отправлено админу {admin_chat_id}")
+
     except Exception as e:
-        logger.error(f"Ошибка при отправке заявки: {str(e)}")
+        logger.error(f"Ошибка при обработке заявки для user_id={user_id}: {str(e)}")
         await send_message_with_retry(
             chat_id=user_id,
-            text="Извините, произошла ошибка при обработке заявки. Попробуйте снова или обратитесь в поддержку."
+            text="Извините, произошла ошибка при обработке заявки. Попробуйте снова или обратитесь в поддержку.",
+            reply_markup=build_client_menu(user_id)
         )
         await send_message_with_retry(
             chat_id=bot_config["owner_id"],
-            text=f"Ошибка при отправке заявки: {str(e)}"
+            text=f"Ошибка при обработке заявки от user_id={user_id}: {str(e)}"
         )
 
     return CHOOSING
