@@ -9,7 +9,7 @@
       "negative_amount": "Сумма должна быть больше 0. Пожалуйста, попробуйте ещё раз.",
       "location_prompt": "Вы получите {result:.2f} {currency}.\nКуда доставить деньги? Выберите локацию:",
       "fine_location_prompt": "Хотите указать точное место? Отправьте геолокацию или ссылку на Google Maps:",
-      "request_accepted": "Ваша заявка принята.\nОперация: {operation}\nСумма: {amount}\nВыдать: {result:.2f} {currency}\nЛокация: {location}\nТочное место: {fine_location}\nОжидайте, с вами скоро свяжутся.",
+      "request_accepted": "Ваша заявка принята.\nОперация: {operation}\nСумма: {amount}\nВыдать: {result} {currency}\nЛокация: {location}\nТочное место: {fine_location}\nОжидайте, с вами скоро свяжутся.",
       "admin_request": "Новая заявка\nОт: {user_link}\nОперация: {operation}\nСумма: {amount}\nВыдать: {result}\nЛокация: {location}\nТочное место: {fine_location}",
       "limit_exceeded": "Вы превысили лимит в {limit} заявок в сутки! Попробуйте завтра.",
       "limit_exceeded_owner": "Бро, ты превысил лимит в {limit} заявок в сутки! Попробуй завтра.",
