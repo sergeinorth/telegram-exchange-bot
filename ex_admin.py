@@ -127,15 +127,29 @@ async def add_pair(update, context):
     if not new_pair_input:
         await update.message.reply_text("Пара не может быть пустой! Введи название, например, Рубли - Доллары.")
         return ADD_PAIR
+    
     new_pair = new_pair_input.replace('-', '→').replace('  ', ' ').strip()
     if new_pair in admin_data['active_pairs']:
         await update.message.reply_text("Эта пара уже существует!")
         return ADMIN_STATE
-    admin_data['pairs'].append(new_pair)
-    admin_data['active_pairs'].append(new_pair)
-    admin_data['rates'][new_pair] = 1.0
-    save_admin_data(admin_id, admin_data)
-    await update.message.reply_text(f"Пара '{new_pair}' добавлена!", reply_markup=build_main_menu(user_id))
+    
+    try:
+        admin_data['pairs'].append(new_pair)
+        admin_data['active_pairs'].append(new_pair)
+        admin_data['rates'][new_pair] = 1.0
+        save_admin_data(admin_id, admin_data)
+        logger.info(f"Пара '{new_pair}' добавлена для admin_id={admin_id}")
+        await update.message.reply_text(
+            f"Пара '{new_pair}' добавлена!",
+            reply_markup=build_main_menu(user_id)
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении пары '{new_pair}' для admin_id={admin_id}: {str(e)}")
+        await update.message.reply_text(
+            "Произошла ошибка при добавлении пары. Попробуй снова или обратись в поддержку.",
+            reply_markup=build_main_menu(user_id)
+        )
+    
     return ADMIN_STATE
 
 async def admin_callback(update, context):
