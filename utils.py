@@ -72,9 +72,26 @@ def save_user_data(user_id, active_order, referrer_id=None):
         conn.close()
 
 def check_request_limit(user_id):
+    from exbot import bot_config  # Локальный импорт bot_config
     try:
         conn = sqlite3.connect('database.db')
         c = conn.cursor()
+        
+        # Проверяем, является ли пользователь владельцем
+        if str(user_id) == bot_config["owner_id"]:
+            return True  # Владелец не имеет лимита
+        
+        # Проверяем, является ли пользователь админом
+        c.execute('SELECT active_order FROM users WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        if result and result[0]:  # Если есть active_order
+            active_order = json.loads(result[0])
+            if 'admin_expiry' in active_order:  # Если есть подписка админа
+                expiry = datetime.strptime(active_order['admin_expiry'], '%Y-%m-%d %H:%M:%S')
+                if datetime.now() <= expiry:  # Подписка активна
+                    return True  # Админ с активной подпиской не имеет лимита
+        
+        # Логика для обычных пользователей
         c.execute('SELECT request_count, last_request_date FROM users WHERE user_id = ?', (user_id,))
         result = c.fetchone()
         if not result:
