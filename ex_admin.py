@@ -168,6 +168,17 @@ async def admin_callback(update, context):
     admin_id = user_id  # Админ редактирует свои данные
     active_order, _, _ = get_user_data(user_id)
 
+    # Логируем состояние in_admin_mode
+    in_admin_mode = context.user_data.get('in_admin_mode', False)
+    logger.info(f"Состояние in_admin_mode для user_id={user_id}: {in_admin_mode}")
+
+    # Проверяем состояние in_admin_mode для всех действий, кроме входа
+    if choice != 'enter_admin' and not in_admin_mode:
+        logger.info(f"Попытка использовать админку без входа: user_id={user_id}, choice={choice}")
+        await query.message.reply_text("Сначала войдите в админку!")
+        logger.info(f"Отправлено уведомление 'Сначала войдите в админку!' для user_id={user_id}")
+        return ConversationHandler.END
+
     if choice == 'enter_admin':
         from exbot import bot_config  # Локальный импорт
         logger.info(f"Проверка доступа в админку для user_id={user_id}")
@@ -704,6 +715,7 @@ def get_admin_handler(cancel_func):
     return ConversationHandler(
         entry_points=[
             CallbackQueryHandler(admin_callback, pattern='^enter_admin$'),
+            CallbackQueryHandler(admin_callback),  # Добавляем обработку всех callback'ов
         ],
         states={
             ADMIN_STATE: [
@@ -738,5 +750,5 @@ def get_admin_handler(cancel_func):
             ]
         },
         fallbacks=[CommandHandler('cancel', cancel_func)],
-        per_message=False  # Явно указываем, что это ожидаемое поведение, варнинг не нужен
+        per_message=False
     )
