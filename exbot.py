@@ -317,7 +317,7 @@ async def get_fine_location(update, context):
     elif update.message.text and "maps.google.com" in update.message.text:
         fine_location = update.message.text
     elif update.message.text == "Пропустить":
-        fine_location = "Не указана"
+        fine_location = "Не указано"
     elif update.message.text == "Назад":
         currency = bot_config["currencies"].get(context.user_data['user_data']['operation'], "unknown")
         reply_markup = build_location_menu(user_id)
@@ -357,13 +357,36 @@ async def get_fine_location(update, context):
         return False
 
     try:
+        # Форматируем сумму с разделителями и без копеек
+        formatted_result = "{:,}".format(int(result)).replace(",", ".")
+        
+        # Определяем валюту
+        currency_raw = operation.split('→')[1].strip() if '→' in operation else "unknown"
+        currency_base = currency_raw.split()[0].lower()
+        currency_corrections = {
+            "рубли": "рубль",
+            "рупии": "рупия",
+            "донги": "донг",
+            "юани": "юань",
+            "баты": "бат",
+            "usdt": "USDT"
+        }
+        currency_root = currency_corrections.get(currency_base, currency_base)
+        if currency_root in ["usdt"]:
+            currency = currency_root.upper()
+        else:
+            currency = numeral.choose_plural(int(result), (currency_root, currency_root + 'а', currency_root + 'ов'))
+
         reply_markup = build_client_menu(user_id)
-        currency = bot_config["currencies"].get(operation, "unknown")
         await send_message_with_retry(
             chat_id=user_id,
             text=bot_config["messages"]["request_accepted"].format(
-                operation=operation, amount=amount, result=result, currency=currency,
-                location=location, fine_location=fine_location
+                operation=operation,
+                amount=amount,
+                result=formatted_result,  # Используем отформатированную сумму
+                currency=currency,       # Используем правильную валюту
+                location=location,
+                fine_location=fine_location
             ),
             reply_markup=reply_markup
         )
@@ -384,8 +407,11 @@ async def get_fine_location(update, context):
             user_link = f"[Пользователь](tg://user?id={user_id})"
 
         admin_message = bot_config["messages"]["admin_request"].format(
-            user_link=user_link, operation=escape_md(operation), amount=escape_md(str(amount)),
-            result=escape_md(f"{result:.2f} {currency}"), location=escape_md(location),
+            user_link=user_link,
+            operation=escape_md(operation),
+            amount=escape_md(str(amount)),
+            result=escape_md(f"{formatted_result} {currency}"),  # Форматируем для админа
+            location=escape_md(location),
             fine_location=escape_md(fine_location)
         )
 
@@ -441,7 +467,12 @@ async def reload_config(update, context):
 async def check_subscriptions(application):
     """Фоновая задача для проверки подписок и отправки уведомлений"""
     from bot_config import bot_config
-    while True:
+    stop_event = asyncio.Event()  # Создаём событие для остановки
+
+    # Сохраняем stop_event в application, чтобы можно было получить его при остановке
+    application.stop_event = stop_event
+
+    while not stop_event.is_set():  # Цикл работает, пока не установлен stop_event
         try:
             conn = sqlite3.connect('database.db')
             c = conn.cursor()
@@ -467,7 +498,13 @@ async def check_subscriptions(application):
         except Exception as e:
             logger.error(f"Ошибка в check_subscriptions: {str(e)}")
         
-        await asyncio.sleep(bot_config["subscription_check_interval"])
+        # Ждём интервал, но проверяем stop_event каждую секунду
+        for _ in range(bot_config["subscription_check_interval"]):
+            if stop_event.is_set():
+                break
+            await asyncio.sleep(1)
+
+    logger.info("Фоновая задача check_subscriptions завершена")
 
 def main():
     init_db()  # load_config() уже вызван в bot_config.py
@@ -495,6 +532,8 @@ def main():
 
     def signal_handler(sig, frame):
         logger.info("Получен сигнал завершения, останавливаем бота...")
+        if hasattr(application, 'stop_event'):
+            application.stop_event.set()  # Устанавливаем stop_event
         application.stop_running()
         sys.exit(0)
 
@@ -509,7 +548,12 @@ def main():
     application.post_init = post_init
 
     logger.info("Запуск бота в режиме polling...")
-    application.run_polling(allowed_updates=["message", "callback_query"])
+    while True:
+        try:
+            application.run_polling(allowed_updates=["message", "callback_query"])
+        except Exception as e:
+            logger.error(f"Error: {e}. Restarting polling...")
+            time.sleep(5)  # Пауза перед перезапуском
 
 if __name__ == "__main__":
     main()
