@@ -29,7 +29,6 @@ def load_config():
             "request_accepted": "Ваша заявка принята.\nОперация: {operation}\nСумма: {amount}\nВыдать: {result} {currency}\nЛокация: {location}\nТочное место: {fine_location}\nОжидайте, с вами скоро свяжутся.",
             "admin_request": "Новая заявка\nОт: {user_link}\nОперация: {operation}\nСумма: {amount}\nВыдать: {result}\nЛокация: {location}\nТочное место: {fine_location}",
             "limit_exceeded": "Вы превысили лимит в {limit} заявок в сутки! Попробуйте завтра.",
-            "limit_exceeded_owner": "Бро, ты превысил лимит в {limit} заявок в сутки! Попробуй завтра.",
             "no_pairs": "Извините, на данный момент нет доступных пар для обмена. Попробуйте позже."
         },
         "default_rates": {
