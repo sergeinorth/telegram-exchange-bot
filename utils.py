@@ -9,15 +9,24 @@ def init_db():
     try:
         conn = sqlite3.connect('database.db')
         c = conn.cursor()
+        # Создаём таблицу, если она ещё не существует
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 active_order TEXT,
                 request_count INTEGER DEFAULT 0,
                 last_request_date TEXT,
-                referrer_id INTEGER
+                referrer_id INTEGER,
+                in_admin_mode INTEGER DEFAULT 0
             )
         ''')
+        # Проверяем, есть ли колонка in_admin_mode
+        c.execute("PRAGMA table_info(users)")
+        columns = [col[1] for col in c.fetchall()]
+        if 'in_admin_mode' not in columns:
+            c.execute('ALTER TABLE users ADD COLUMN in_admin_mode INTEGER DEFAULT 0')
+            logger.info("Добавлена колонка in_admin_mode в таблицу users")
+        # Создаём остальные таблицы
         c.execute('''
             CREATE TABLE IF NOT EXISTS admins (
                 admin_id INTEGER PRIMARY KEY,
@@ -26,6 +35,14 @@ def init_db():
                 active_locations TEXT,
                 pairs TEXT,
                 active_pairs TEXT
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS otps (
+                otp TEXT PRIMARY KEY,
+                user_id INTEGER,
+                expiry TEXT,
+                duration INTEGER
             )
         ''')
         conn.commit()
@@ -41,32 +58,62 @@ def get_user_data(user_id):
     try:
         conn = sqlite3.connect('database.db')
         c = conn.cursor()
-        c.execute('SELECT active_order, request_count, referrer_id FROM users WHERE user_id = ?', (user_id,))
+        c.execute('SELECT active_order, request_count, referrer_id, in_admin_mode FROM users WHERE user_id = ?', (user_id,))
         result = c.fetchone()
         if result is not None:
-            return result[0], result[1], result[2]  # Всё ок, возвращаем кортеж
-        return None, 0, None  # Пользователь не найден
+            return result[0], result[1], result[2], result[3]
+        return None, 0, None, 0
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении данных пользователя {user_id}: {e}")
-        return None, 0, None  # Ошибка базы, возвращаем дефолт
+        return None, 0, None, 0
     finally:
         if conn:
             conn.close()
 
-def save_user_data(user_id, active_order, referrer_id=None):
+def save_user_data(user_id, active_order, referrer_id=None, in_admin_mode=None):
     try:
         conn = sqlite3.connect('database.db')
         c = conn.cursor()
-        if referrer_id is not None:
-            c.execute('INSERT OR REPLACE INTO users (user_id, active_order, request_count, referrer_id) VALUES (?, ?, ?, ?)',
-                      (user_id, json.dumps(active_order) if active_order else None, 0, referrer_id))
+        c.execute('SELECT COUNT(*) FROM users WHERE user_id = ?', (user_id,))
+        exists = c.fetchone()[0] > 0
+
+        active_order_json = None
+        if active_order is not None:
+            try:
+                active_order_json = json.dumps(active_order)
+            except TypeError as e:
+                logger.error(f"Ошибка сериализации active_order для user_id={user_id}: {str(e)}, active_order={active_order}")
+                raise
+
+        if not exists:
+            c.execute('INSERT INTO users (user_id, active_order, request_count, referrer_id, in_admin_mode) VALUES (?, ?, ?, ?, ?)',
+                      (user_id, active_order_json, 0, referrer_id if referrer_id is not None else None, in_admin_mode if in_admin_mode is not None else 0))
+            logger.debug(f"Новая запись: user_id={user_id}, active_order={active_order}, referrer_id={referrer_id}, in_admin_mode={in_admin_mode}")
+        elif referrer_id is not None and in_admin_mode is not None:
+            c.execute('INSERT OR REPLACE INTO users (user_id, active_order, request_count, referrer_id, in_admin_mode) VALUES (?, ?, ?, ?, ?)',
+                      (user_id, active_order_json, 0, referrer_id, in_admin_mode))
+            logger.debug(f"Полное обновление: user_id={user_id}, active_order={active_order}, referrer_id={referrer_id}, in_admin_mode={in_admin_mode}")
+        elif referrer_id is not None:
+            c.execute('UPDATE users SET active_order = ?, referrer_id = ? WHERE user_id = ?',
+                      (active_order_json, referrer_id, user_id))
+            logger.debug(f"Обновление с referrer_id: user_id={user_id}, active_order={active_order}, referrer_id={referrer_id}")
+        elif in_admin_mode is not None:
+            c.execute('UPDATE users SET active_order = ?, in_admin_mode = ? WHERE user_id = ?',
+                      (active_order_json, in_admin_mode, user_id))
+            logger.debug(f"Обновление in_admin_mode: user_id={user_id}, active_order={active_order}, in_admin_mode={in_admin_mode}")
         else:
             c.execute('UPDATE users SET active_order = ? WHERE user_id = ?',
-                      (json.dumps(active_order) if active_order else None, user_id))
+                      (active_order_json, user_id))
+            logger.debug(f"Обновление active_order: user_id={user_id}, active_order={active_order}")
         conn.commit()
-        logger.debug(f"Данные пользователя {user_id} сохранены: active_order={active_order}, referrer_id={referrer_id}")
+        c.execute('SELECT in_admin_mode FROM users WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        logger.debug(f"Проверка после сохранения: user_id={user_id}, in_admin_mode в БД={result[0] if result else None}")
     except sqlite3.Error as e:
         logger.error(f"Ошибка при сохранении данных пользователя {user_id}: {e}")
+        raise
+    except TypeError as e:
+        logger.error(f"Ошибка сериализации в save_user_data для user_id={user_id}: {str(e)}")
         raise
     finally:
         conn.close()
