@@ -1,8 +1,9 @@
 import json
-import logging
 import sqlite3
+import logging
+import pytz
 from datetime import datetime
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
@@ -38,12 +39,12 @@ def build_main_menu(user_id):
         [InlineKeyboardButton("Рассылка 📩", callback_data='broadcast')],
         [InlineKeyboardButton("Выход 🚪", callback_data='exit')]
     ]
-    active_order, _, _ = get_user_data(user_id)
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)  # Исправлено: распаковываем 4 значения
     if str(user_id) == bot_config["owner_id"]:
         keyboard.insert(0, [InlineKeyboardButton("Сгенерировать OTP", callback_data='generate_otp')])
         keyboard.insert(1, [InlineKeyboardButton("Проверить подписку 🔍", callback_data='check_subscription')])
         keyboard.insert(2, [InlineKeyboardButton("Моя реф. ссылка 🔗", callback_data='generate_ref_link')])
-        keyboard.insert(3, [InlineKeyboardButton("Перезагрузить конфиг 🔄", callback_data='reload_config')])  # Новая кнопка
+        keyboard.insert(3, [InlineKeyboardButton("Перезагрузить конфиг 🔄", callback_data='reload_config')])
     elif active_order and 'admin_expiry' in json.loads(active_order):
         keyboard.insert(0, [InlineKeyboardButton("Проверить подписку 🔍", callback_data='check_subscription')])
         keyboard.insert(1, [InlineKeyboardButton("Моя реф. ссылка 🔗", callback_data='generate_ref_link')])
@@ -153,142 +154,129 @@ async def add_pair(update, context):
     return ADMIN_STATE
 
 async def admin_callback(update, context):
-    logger.info("Вызов admin_callback")
-    if update.callback_query:
-        query = update.callback_query
+    query = update.callback_query
+    if not query:
+        logger.error("Нет callback_query в update!")
+        await update.message.reply_text("Ошибка обработки команды. Попробуй снова.")
+        return ConversationHandler.END
+
+    try:
         await query.answer()
-        choice = query.data
-        user_id = query.from_user.id
-        logger.info(f"Обработка callback_query: choice={choice}, user_id={user_id}")
-    else:
-        choice = "enter_admin"
-        user_id = update.message.from_user.id
-        logger.info(f"Обработка текстового сообщения: choice={choice}, user_id={user_id}")
+        logger.info(f"Callback обработан: user_id={query.from_user.id}, choice={query.data}")
+    except Exception as e:
+        logger.error(f"Ошибка при ответе на callback для user_id={query.from_user.id}: {str(e)}")
+        return ConversationHandler.END
 
-    admin_id = user_id  # Админ редактирует свои данные
-    active_order, _, _ = get_user_data(user_id)
+    choice = query.data
+    user_id = query.from_user.id
+    admin_id = user_id
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
+    logger.info(f"Состояние: user_id={user_id}, in_admin_mode={in_admin_mode}, choice={choice}")
 
-    # Логируем состояние in_admin_mode
-    in_admin_mode = context.user_data.get('in_admin_mode', False)
-    logger.info(f"Состояние in_admin_mode для user_id={user_id}: {in_admin_mode}")
+    from exbot import bot_config
+    owner_id = bot_config["owner_id"]
 
-    # Проверяем состояние in_admin_mode для всех действий, кроме входа
+    # Проверка: если не в админке и не пытаемся войти, блокируем действия админки
     if choice != 'enter_admin' and not in_admin_mode:
-        logger.info(f"Попытка использовать админку без входа: user_id={user_id}, choice={choice}")
-        await query.message.reply_text("Сначала войдите в админку!")
-        logger.info(f"Отправлено уведомление 'Сначала войдите в админку!' для user_id={user_id}")
+        await query.message.reply_text("Сначала войди в админку через 'Войти в админку'!")
         return ConversationHandler.END
 
     if choice == 'enter_admin':
-        from exbot import bot_config  # Локальный импорт
-        logger.info(f"Проверка доступа в админку для user_id={user_id}")
-        owner_id = bot_config.get("owner_id")  # Используем .get() для безопасности
-        if not owner_id:
-            logger.error("owner_id не найден в bot_config!")
-            if update.callback_query:
-                await query.message.reply_text("Ошибка конфигурации бота. Обратитесь к разработчику.")
-            else:
-                await update.message.reply_text("Ошибка конфигурации бота. Обратитесь к разработчику.")
-            return ConversationHandler.END
         if str(user_id) != owner_id:
-            if not active_order or 'admin_expiry' not in json.loads(active_order):
-                logger.info(f"Доступ запрещён: нет active_order или admin_expiry для user_id={user_id}")
-                if update.callback_query:
-                    await query.message.reply_text("Бро, это только для админов!")
-                else:
-                    await update.message.reply_text("Бро, это только для админов!")
+            if not active_order:
+                await query.message.reply_text("Бро, это только для админов!")
                 return ConversationHandler.END
-            else:
-                try:
-                    expiry = datetime.strptime(json.loads(active_order)['admin_expiry'], '%Y-%m-%d %H:%M:%S')
-                    logger.info(f"Срок действия админки: {expiry}")
-                    if datetime.now() > expiry:
-                        logger.info(f"Срок действия истёк для user_id={user_id}")
-                        data = json.loads(active_order)
-                        data.pop('admin_expiry', None)
-                        save_user_data(user_id, data)
-                        if update.callback_query:
-                            await query.message.reply_text("Бро, твоя админская подписка истекла!")
-                        else:
-                            await update.message.reply_text("Бро, твоя админская подписка истекла!")
-                        return ConversationHandler.END
-                except Exception as e:
-                    logger.error(f"Ошибка при проверке admin_expiry для user_id={user_id}: {str(e)}")
-                    if update.callback_query:
-                        await query.message.reply_text("Произошла ошибка при проверке подписки. Обратитесь к владельцу.")
-                    else:
-                        await update.message.reply_text("Произошла ошибка при проверки подписки. Обратитесь к владельцу.")
+            try:
+                active_order_dict = json.loads(active_order) if isinstance(active_order, str) else {}
+                if not isinstance(active_order_dict, dict) or 'admin_expiry' not in active_order_dict:
+                    await query.message.reply_text("Бро, это только для админов!")
                     return ConversationHandler.END
-        logger.info(f"Доступ разрешён для user_id={user_id}")
-        context.user_data['in_admin_mode'] = True
+                expiry = datetime.strptime(active_order_dict['admin_expiry'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
+                if datetime.now(pytz.UTC) > expiry:
+                    active_order_dict.pop('admin_expiry', None)
+                    save_user_data(user_id, active_order_dict, referrer_id, in_admin_mode=0)
+                    await query.message.reply_text("Бро, твоя админская подписка истекла!")
+                    return ConversationHandler.END
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"Ошибка парсинга active_order для user_id={user_id}: {str(e)}, active_order={active_order}")
+                await query.message.reply_text("Ошибка данных. Попробуй снова или пиши в поддержку.")
+                return ConversationHandler.END
+        # Устанавливаем in_admin_mode=1 при входе
+        active_order_dict = json.loads(active_order) if active_order and isinstance(active_order, str) else {}
+        save_user_data(user_id, active_order_dict, referrer_id, in_admin_mode=1)
+        # Проверяем, что данные обновились
+        _, _, _, in_admin_mode_check = get_user_data(user_id)
+        logger.debug(f"После сохранения: in_admin_mode={in_admin_mode_check}")
+        if not in_admin_mode_check:
+            logger.error(f"Не удалось установить in_admin_mode=1 для user_id={user_id}")
+            await query.message.reply_text("Ошибка входа в админку. Попробуй снова или пиши в поддержку.")
+            return ConversationHandler.END
+        await query.message.reply_text(
+            "Переключаемся в админку...",
+            reply_markup=ReplyKeyboardRemove()
+        )
         reply_markup = build_main_menu(user_id)
-        if update.callback_query:
-            await query.message.reply_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
-        else:
-            await update.message.reply_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
+        await query.message.reply_text(
+            "Админ-панель: выбери раздел",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
         return ADMIN_STATE
 
     elif choice == 'exit':
-        logger.info(f"Выход из админки для user_id={user_id}")
-        context.user_data['in_admin_mode'] = False
-        from exbot import build_client_menu, bot_config  # Локальный импорт
+        active_order_dict = json.loads(active_order) if active_order and isinstance(active_order, str) else {}
+        save_user_data(user_id, active_order_dict, referrer_id, in_admin_mode=0)
+        from exbot import build_client_menu
         reply_markup = build_client_menu(user_id)
-        await query.message.reply_text(bot_config["messages"]["welcome"].format(name=query.from_user.first_name), reply_markup=reply_markup)
+        await query.message.reply_text(
+            bot_config["messages"]["welcome"].format(name=query.from_user.first_name),
+            reply_markup=reply_markup
+        )
+        await query.message.delete()
         return ConversationHandler.END
 
+        # Остальной код остаётся без изменений
+
     elif choice == 'manage_location':
-        logger.info(f"Управление локациями для admin_id={admin_id}")
-        context.user_data['in_admin_mode'] = True
         keyboard = [
             [InlineKeyboardButton("Добавить", callback_data='add_location')],
             [InlineKeyboardButton("Удалить", callback_data='remove_location')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text("Что ты хочешь сделать с локациями?", reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text("Что ты хочешь сделать с локациями?", reply_markup=reply_markup, parse_mode='Markdown')
         return ADMIN_STATE
 
     elif choice == 'manage_pair':
-        logger.info(f"Управление парами для admin_id={admin_id}")
-        context.user_data['in_admin_mode'] = True
         keyboard = [
             [InlineKeyboardButton("Добавить", callback_data='add_pair')],
             [InlineKeyboardButton("Удалить", callback_data='remove_pair')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text("Что ты хочешь сделать с парами?", reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text("Что ты хочешь сделать с парами?", reply_markup=reply_markup, parse_mode='Markdown')
         return ADMIN_STATE
 
     elif choice == 'add_location':
-        logger.info(f"Запрос ввода новой локации для admin_id={admin_id}")
-        context.user_data['in_admin_mode'] = True
-        await query.message.reply_text("Введите новую локацию (например, 'Гоа'):")
+        await query.edit_message_text("Введите новую локацию (например, 'Гоа'):")
         return ADD_LOCATION
 
     elif choice == 'add_pair':
-        logger.info(f"Запрос ввода новой пары для admin_id={admin_id}")
-        context.user_data['in_admin_mode'] = True
-        await query.message.reply_text("Введите новую валютную пару (например, 'Рубли → Доллары'):")
+        await query.edit_message_text("Введите новую валютную пару (например, 'Рубли → Доллары'):")
         return ADD_PAIR
 
     elif choice == 'edit_rates':
-        logger.info(f"Редактирование курсов для admin_id={admin_id}")
         return await edit_rates_handler(update, context, admin_id)
 
     elif choice == 'edit_pairs':
-        logger.info(f"Управление парами для admin_id={admin_id}")
         return await edit_pairs_handler(update, context, admin_id)
 
     elif choice == 'edit_locations':
-        logger.info(f"Управление локациями для admin_id={admin_id}")
         return await edit_locations_handler(update, context, admin_id)
 
     elif choice == 'set_rate':
-        logger.info(f"Запрос установки курса для admin_id={admin_id}")
         admin_data = get_admin_data(admin_id)
-        context.user_data['in_admin_mode'] = True
         rates_text = "\n".join([f"*{k}*: {v:.2f}" for k, v in admin_data['rates'].items()])
         reply_markup = build_rates_menu(admin_id)
-        await query.message.reply_text(
+        await query.edit_message_text(
             f"📊 *Текущие курсы:*\n{rates_text}\nВыбери пару для редактирования:",
             reply_markup=reply_markup,
             parse_mode='Markdown'
@@ -296,91 +284,72 @@ async def admin_callback(update, context):
         return SET_RATE
 
     elif choice == 'generate_otp':
-        logger.info(f"Запрос генерации OTP для user_id={user_id}")
-        context.user_data['in_admin_mode'] = True
+        if str(user_id) != owner_id:
+            await query.edit_message_text("Только владелец может генерировать OTP!")
+            return ADMIN_STATE
         keyboard = [
             [InlineKeyboardButton("7 дней", callback_data='generate_otp_7')],
             [InlineKeyboardButton("30 дней", callback_data='generate_otp_30')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text("Выбери срок действия OTP:", reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text("Выбери срок действия OTP:", reply_markup=reply_markup, parse_mode='Markdown')
         return GENERATE_OTP
 
     elif choice == 'generate_otp_7':
-        from exbot import bot_config  # Локальный импорт
-        if str(user_id) == bot_config["owner_id"]:
-            logger.info(f"Генерация OTP на 7 дней для user_id={user_id}")
+        if str(user_id) == owner_id:
             otp, expiry = generate_otp(7)
             save_otp_data(otp, None, expiry.strftime('%Y-%m-%d %H:%M:%S'), 7)
-            await query.message.reply_text(
-                "Сгенерирован OTP\nСрок действия: 7 дней\nСкопируйте и отправьте этот код новому админу.",
-                parse_mode='Markdown'
-            )
-            reply_markup = build_main_menu(user_id)
-            await query.message.reply_text(
-                f"/otp {otp}",
-                reply_markup=reply_markup,
+            await query.edit_message_text(
+                f"Сгенерирован OTP\nСрок действия: 7 дней\nКод: `/otp {otp}`\nСкопируй и отправь новому админу.",
+                reply_markup=build_main_menu(user_id),
                 parse_mode='Markdown'
             )
         return ADMIN_STATE
 
     elif choice == 'generate_otp_30':
-        from exbot import bot_config  # Локальный импорт
-        if str(user_id) == bot_config["owner_id"]:
-            logger.info(f"Генерация OTP на 30 дней для user_id={user_id}")
+        if str(user_id) == owner_id:
             otp, expiry = generate_otp(30)
             save_otp_data(otp, None, expiry.strftime('%Y-%m-%d %H:%M:%S'), 30)
-            await query.message.reply_text(
-                "Сгенерирован OTP\nСрок действия: 30 дней\nСкопируйте и отправьте этот код новому админу.",
-                parse_mode='Markdown'
-            )
-            reply_markup = build_main_menu(user_id)
-            await query.message.reply_text(
-                f"/otp {otp}",
-                reply_markup=reply_markup,
+            await query.edit_message_text(
+                f"Сгенерирован OTP\nСрок действия: 30 дней\nКод: `/otp {otp}`\nСкопируй и отправь новому админу.",
+                reply_markup=build_main_menu(user_id),
                 parse_mode='Markdown'
             )
         return ADMIN_STATE
 
     elif choice == 'check_subscription':
-        from exbot import bot_config  # Локальный импорт
-        if str(user_id) == bot_config["owner_id"] or (active_order and 'admin_expiry' in json.loads(active_order)):
-            try:
-                await check_subscription(update, context)
-            except Exception as e:
-                logger.error(f"Ошибка при проверке подписки: {str(e)}")
-                await query.message.reply_text(
-                    "Бро, ошибка при проверке подписки, но ты всё ещё в админке! 😊",
-                    reply_markup=build_main_menu(user_id)
-                )
+        await check_subscription(update, context)
+        await query.message.reply_text("Вернулся в админку!", reply_markup=build_main_menu(user_id))
         return ADMIN_STATE
 
     elif choice == 'generate_ref_link':
         ref_link = f"https://t.me/goa_exchangeBot?start=ref_{user_id}"
-        await query.message.reply_text(f'<a href="{ref_link}">мой бот обменник</a>', parse_mode='HTML', disable_web_page_preview=True)
-        await query.message.reply_text("Это твоя реферальная ссылка. Скопируй и отправь её друзьям!", reply_markup=build_main_menu(user_id), parse_mode='Markdown')
+        await query.edit_message_text(
+            f'<a href="{ref_link}">Мой бот обменник</a>\nСкопируй и отправь друзьям!',
+            reply_markup=build_main_menu(user_id),
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
         return ADMIN_STATE
-    
+
     elif choice == 'broadcast':
-        logger.info(f"Запрос рассылки для admin_id={admin_id}")
-        context.user_data['in_admin_mode'] = True
-        await query.message.reply_text("Введи текст для рассылки своим клиентам:")
+        await query.edit_message_text("Введи текст для рассылки своим клиентам:")
         return BROADCAST
 
     elif choice == 'reload_config':
-        from bot_config import load_config  # Исправляем импорт
+        from bot_config import load_config
         try:
             load_config()
-            await query.message.reply_text("Конфигурация успешно перезагружена!", reply_markup=build_main_menu(user_id))
-            logger.info(f"Конфигурация перезагружена через админку пользователем {user_id}")
+            await query.edit_message_text("Конфигурация успешно перезагружена!", reply_markup=build_main_menu(user_id))
+            logger.info(f"Конфигурация перезагружена пользователем {user_id}")
         except Exception as e:
-            logger.error(f"Ошибка при перезагрузке конфигурации через админку: {str(e)}")
-            await query.message.reply_text(f"Ошибка при перезагрузке конфигурации: {str(e)}", reply_markup=build_main_menu(user_id))
+            logger.error(f"Ошибка при перезагрузке конфигурации: {str(e)}")
+            await query.edit_message_text(f"Ошибка при перезагрузке: {str(e)}", reply_markup=build_main_menu(user_id))
         return ADMIN_STATE
 
     elif choice == 'back_to_main':
         reply_markup = build_main_menu(user_id)
-        await query.message.reply_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
         return ADMIN_STATE
 
     elif choice.startswith('delete_pair_'):
@@ -393,9 +362,9 @@ async def admin_callback(update, context):
             if pair_to_delete in admin_data['rates']:
                 del admin_data['rates'][pair_to_delete]
             save_admin_data(admin_id, admin_data)
-            await query.message.reply_text(f"Пара '{pair_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
+            await query.edit_message_text(f"Пара '{pair_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
         else:
-            await query.message.reply_text("Пара не найдена!")
+            await query.edit_message_text("Пара не найдена!", reply_markup=build_main_menu(user_id))
         return ADMIN_STATE
 
     elif choice.startswith('delete_location_'):
@@ -406,15 +375,15 @@ async def admin_callback(update, context):
             if location_to_delete in admin_data['active_locations']:
                 admin_data['active_locations'].remove(location_to_delete)
             save_admin_data(admin_id, admin_data)
-            await query.message.reply_text(f"Локация '{location_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
+            await query.edit_message_text(f"Локация '{location_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
         else:
-            await query.message.reply_text("Локация не найдена!")
+            await query.edit_message_text("Локация не найдена!", reply_markup=build_main_menu(user_id))
         return ADMIN_STATE
 
     elif choice == 'remove_pair':
         admin_data = get_admin_data(admin_id)
         if not admin_data['pairs']:
-            await query.message.reply_text("Нет пар для удаления!")
+            await query.edit_message_text("Нет пар для удаления!", reply_markup=build_main_menu(user_id))
             return ADMIN_STATE
         keyboard = [
             [InlineKeyboardButton(pair, callback_data=f'delete_pair_{pair}') for pair in admin_data['pairs'][i:i+2]]
@@ -422,13 +391,13 @@ async def admin_callback(update, context):
         ]
         keyboard.append([InlineKeyboardButton("Назад ⬅️", callback_data='back_to_main')])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text("Выбери пару для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text("Выбери пару для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
         return EDIT_PAIRS
 
     elif choice == 'remove_location':
         admin_data = get_admin_data(admin_id)
         if not admin_data['locations']:
-            await query.message.reply_text("Нет локаций для удаления!")
+            await query.edit_message_text("Нет локаций для удаления!", reply_markup=build_main_menu(user_id))
             return ADMIN_STATE
         keyboard = [
             [InlineKeyboardButton(loc, callback_data=f'delete_location_{loc}') for loc in admin_data['locations'][i:i+2]]
@@ -436,23 +405,43 @@ async def admin_callback(update, context):
         ]
         keyboard.append([InlineKeyboardButton("Назад ⬅️", callback_data='back_to_main')])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.reply_text("Выбери локацию для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
+        await query.edit_message_text("Выбери локацию для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
         return EDIT_LOCATIONS
 
-    return ConversationHandler.END
+    logger.warning(f"Неизвестный choice: {choice}")
+    return ADMIN_STATE
 
 async def edit_rates_handler(update, context, admin_id):
     query = update.callback_query
-    await query.answer()
-    admin_data = get_admin_data(admin_id)
-    rates_text = "\n".join([f"*{k}*: {v:.2f}" for k, v in admin_data['rates'].items()])
-    reply_markup = build_rates_menu(admin_id)
-    await query.message.reply_text(
-        f"📊 *Текущие курсы:*\n{rates_text}\nВыбери пару для редактирования:",
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
-    return EDIT_RATES
+    try:
+        await query.answer()
+        logger.info(f"edit_rates_handler: Ответ на callback-запрос отправлен для user_id={admin_id}")
+    except Exception as e:
+        logger.error(f"Ошибка при ответе на callback-запрос в edit_rates_handler для user_id={admin_id}: {str(e)}")
+        return ConversationHandler.END
+
+    try:
+        admin_data = get_admin_data(admin_id)
+        logger.info(f"admin_data['rates'] для user_id={admin_id}: {admin_data['rates']}")
+        rates_text = "\n".join([f"*{k}*: {v:.2f}" for k, v in admin_data['rates'].items()])
+        reply_markup = build_rates_menu(admin_id)
+        await query.message.reply_text(
+            f"📊 *Текущие курсы:*\n{rates_text}\nВыбери пару для редактирования:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        logger.info(f"Сообщение с курсами отправлено для user_id={admin_id}")
+        return EDIT_RATES
+    except Exception as e:
+        logger.error(f"Ошибка в edit_rates_handler для user_id={admin_id}: {str(e)}")
+        try:
+            await query.message.reply_text(
+                "Произошла ошибка при загрузке курсов. Попробуй снова.",
+                reply_markup=build_main_menu(admin_id)
+            )
+        except Exception as reply_error:
+            logger.error(f"Ошибка при отправке сообщения об ошибке для user_id={admin_id}: {str(reply_error)}")
+        return ADMIN_STATE
 
 async def rates_callback(update, context):
     query = update.callback_query
@@ -750,5 +739,5 @@ def get_admin_handler(cancel_func):
             ]
         },
         fallbacks=[CommandHandler('cancel', cancel_func)],
-        per_message=False
+        per_message=False  # Оставляем только этот параметр
     )
