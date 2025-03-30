@@ -3,6 +3,7 @@ import logging
 from telegram.ext import Application
 from dotenv import load_dotenv
 import json
+import asyncio  # Добавляем импорт asyncio
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -24,7 +25,7 @@ def load_config():
             "amount_prompt": "Вы выбрали {operation}.\nКакую сумму хотите обменять? Укажите сумму:\n(Для USDT — в USDT, для рублей и рупий — в соответствующей валюте)",
             "invalid_amount": "Пожалуйста, укажите сумму числом.",
             "negative_amount": "Сумма должна быть больше 0. Пожалуйста, попробуйте ещё раз.",
-            "location_prompt": "Вы получите {result:.2f} {currency}.\nКуда доставить деньги? Выберите локацию:",
+            "location_prompt": "Вы получите {result} {currency}.\nКуда доставить деньги? Выберите локацию:",  # Исправили .2f на просто {result}
             "fine_location_prompt": "Хотите указать точное место? Отправьте геолокацию или ссылку на Google Maps:",
             "request_accepted": "Ваша заявка принята.\nОперация: {operation}\nСумма: {amount}\nВыдать: {result} {currency}\nЛокация: {location}\nТочное место: {fine_location}\nОжидайте, с вами скоро свяжутся.",
             "admin_request": "Новая заявка\nОт: {user_link}\nОперация: {operation}\nСумма: {amount}\nВыдать: {result}\nЛокация: {location}\nТочное место: {fine_location}",
@@ -95,4 +96,8 @@ def load_config():
 # Загружаем конфиг при импорте модуля
 load_config()
 
-application = Application.builder().token(TOKEN).build()
+# Создаём application с увеличенными тайм-аутами
+application = Application.builder().token(TOKEN).read_timeout(10).write_timeout(10).connect_timeout(10).build()
+
+# Добавляем stop_event к application
+application.stop_event = asyncio.Event()
