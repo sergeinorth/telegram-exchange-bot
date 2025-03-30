@@ -4,6 +4,12 @@ import sys
 import logging
 import asyncio
 import sqlite3
+import time
+import pytz
+import telegram.ext
+import inspect
+
+from telegram.error import NetworkError, TimedOut, TelegramError
 from telegram.ext import Application, CommandHandler, ConversationHandler, MessageHandler
 from telegram.ext import filters
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
@@ -32,15 +38,60 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 CHOOSING, AMOUNT, LOCATION, FINE_LOCATION = range(4)
 
+async def send_message_with_retry(context, chat_id, text, parse_mode=None, reply_markup=None, retries=3, timeout=10):
+    for attempt in range(retries):
+        try:
+            await asyncio.wait_for(
+                context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup),
+                timeout=timeout
+            )
+            logger.info(f"Сообщение успешно отправлено в чат {chat_id} с попытки {attempt + 1}")
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"Тайм-аут при отправке сообщения в чат {chat_id}, попытка {attempt + 1} из {retries}")
+        except telegram.error.TimedOut as e:
+            logger.warning(f"Telegram TimedOut в чат {chat_id}, попытка {attempt + 1} из {retries}: {str(e)}")
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения в чат {chat_id}: {str(e)}")
+            break
+        if attempt < retries - 1:
+            await asyncio.sleep(2)  # Пауза между попытками
+    logger.error(f"Не удалось отправить сообщение в чат {chat_id} после {retries} попыток")
+    return False
+
 def build_client_menu(user_id):
-    active_order, request_count, referrer_id = get_user_data(user_id)
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
+    logger.debug(f"build_client_menu: active_order={active_order}, type={type(active_order)}, referrer_id={referrer_id}, in_admin_mode={in_admin_mode}")
     if active_order is None and request_count == 0 and referrer_id is None:
         logger.warning(f"Не удалось получить данные пользователя {user_id} в build_client_menu, используем owner_id")
-        referrer_id = bot_config["owner_id"]  # Дефолтный admin_id
+        referrer_id = bot_config["owner_id"]
     admin_id = referrer_id if referrer_id else bot_config["owner_id"]
     admin_data = get_admin_data(admin_id)
     reply_keyboard = [admin_data['active_pairs'][i:i+2] for i in range(0, len(admin_data['active_pairs']), 2)]
-    if str(user_id) == bot_config["owner_id"] or (active_order and 'admin_expiry' in json.loads(active_order)):
+    is_owner = str(user_id) == bot_config["owner_id"]
+    has_admin_expiry = False
+    if active_order:
+        try:
+            logger.debug(f"Перед json.loads: active_order={active_order}, type={type(active_order)}")
+            active_order_dict = json.loads(active_order) if isinstance(active_order, str) else active_order
+            logger.debug(f"После json.loads: active_order_dict={active_order_dict}, type={type(active_order_dict)}")
+            has_admin_expiry = isinstance(active_order_dict, dict) and 'admin_expiry' in active_order_dict
+            logger.debug(f"Проверка has_admin_expiry: isinstance={isinstance(active_order_dict, dict)}, 'admin_expiry' in dict={'admin_expiry' in active_order_dict if isinstance(active_order_dict, dict) else 'N/A'}, has_admin_expiry={has_admin_expiry}")
+            if has_admin_expiry:
+                expiry = datetime.strptime(active_order_dict['admin_expiry'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
+                logger.debug(f"expiry={expiry}, now={datetime.now(pytz.UTC)}")
+                if datetime.now(pytz.UTC) > expiry:
+                    logger.debug(f"Подписка истекла, удаляем admin_expiry из active_order_dict")
+                    active_order_dict.pop('admin_expiry', None)
+                    save_user_data(user_id, active_order_dict, referrer_id, in_admin_mode)
+                    has_admin_expiry = False
+                    logger.info(f"Подписка истекла для user_id={user_id}, 'admin_expiry' удалён")
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error(f"Ошибка парсинга active_order в build_client_menu для user_id={user_id}: {str(e)}, active_order={active_order}")
+            active_order_dict = {}
+            has_admin_expiry = False
+    logger.info(f"build_client_menu для user_id={user_id}: is_owner={is_owner}, has_admin_expiry={has_admin_expiry}, active_order={active_order}")
+    if is_owner or has_admin_expiry:
         reply_keyboard.append(["Админка"])
     return ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=False, resize_keyboard=True)
 
@@ -48,7 +99,7 @@ def build_amount_menu():
     return ReplyKeyboardMarkup([["Назад"]], one_time_keyboard=True, resize_keyboard=True)
 
 def build_location_menu(user_id):
-    _, _, referrer_id = get_user_data(user_id)
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)  # Полная распаковка
     admin_id = referrer_id if referrer_id else bot_config["owner_id"]
     admin_data = get_admin_data(admin_id)
     reply_keyboard = [admin_data['active_locations'][i:i+3] for i in range(0, len(admin_data['active_locations']), 3)]
@@ -65,24 +116,29 @@ async def start(update, context):
     user = update.message.from_user
     user_id = user.id
 
-    active_order, request_count, referrer_id = get_user_data(user_id)
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
     if active_order is None and request_count == 0 and referrer_id is None:
-        logger.warning(f"Не удалось получить данные пользователя {user_id}, возможно, проблема с базой")
+        logger.warning(f"Не удалось получить данные пользователя {user_id}, создаём новую запись")
+        save_user_data(user_id, None, referrer_id=bot_config["owner_id"], in_admin_mode=0)
+        active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
 
     if not active_order and not referrer_id:
         args = context.args
         if args and args[0].startswith("ref_"):
             try:
                 referrer_id = int(args[0].replace("ref_", ""))
-                save_user_data(user_id, None, referrer_id=referrer_id)
+                save_user_data(user_id, None, referrer_id=referrer_id, in_admin_mode=0)
                 logger.info(f"Пользователь {user_id} привязан к админу {referrer_id} через рефералку")
                 user_link = f"@{user.username}" if user.username else f"[Пользователь](tg://user?id={user_id})"
-                await context.bot.send_message(
+                await send_message_with_retry(
+                    context,
                     chat_id=referrer_id,
                     text=f"Новый пользователь {user_link} запустил бота через твою реферальную ссылку!"
                 )
             except ValueError:
                 logger.warning(f"Некорректный реферальный ID: {args[0]}")
+                referrer_id = bot_config["owner_id"]
+                save_user_data(user_id, None, referrer_id=referrer_id, in_admin_mode=0)
 
     if active_order:
         context.user_data['in_admin_mode'] = 'admin_expiry' in json.loads(active_order)
@@ -99,29 +155,10 @@ async def start(update, context):
     reply_markup = build_client_menu(user_id)
     logger.info("Отправка приветственного сообщения")
 
-    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=3, timeout=10):
-        for attempt in range(retries):
-            try:
-                await asyncio.wait_for(
-                    context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup),
-                    timeout=timeout
-                )
-                logger.info(f"Сообщение успешно отправлено в чат {chat_id} с попытки {attempt + 1}")
-                return True
-            except asyncio.TimeoutError:
-                logger.warning(f"Тайм-аут при отправке сообщения в чат {chat_id}, попытка {attempt + 1} из {retries}")
-            except telegram.error.TimedOut as e:
-                logger.warning(f"Telegram TimedOut в чат {chat_id}, попытка {attempt + 1} из {retries}: {str(e)}")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке сообщения в чат {chat_id}: {str(e)}")
-                break
-            if attempt < retries - 1:
-                await asyncio.sleep(2)  # Пауза между попытками
-        logger.error(f"Не удалось отправить сообщение в чат {chat_id} после {retries} попыток")
-        return False
     try:
         if active_order or referrer_id:
             await send_message_with_retry(
+                context,
                 chat_id=user_id,
                 text=bot_config["messages"]["welcome"].format(name=user.first_name),
                 reply_markup=reply_markup
@@ -129,6 +166,7 @@ async def start(update, context):
         else:
             save_user_data(user_id, None, referrer_id)
             await send_message_with_retry(
+                context,
                 chat_id=user_id,
                 text=bot_config["messages"]["welcome"].format(name=user.first_name),
                 reply_markup=reply_markup
@@ -144,60 +182,43 @@ async def choose_operation(update, context):
     logger.info("Начало обработки выбора операции")
     user_id = update.message.from_user.id
     
-    # Проверяем, находится ли пользователь в админке
-    if context.user_data.get('in_admin_mode', False):
-        logger.info(f"Пользователь {user_id} уже в админке")
-        choice = update.message.text
-        from ex_admin import build_main_menu  # Локальный импорт
-        if choice == "Админка":
-            # Пользователь уже в админке и нажал "Админка"
-            reply_markup = build_main_menu(user_id)
-            await update.message.reply_text(
-                "Вы уже в админке! Выберите раздел:",
-                reply_markup=reply_markup
-            )
-            return ADMIN_STATE
-        else:
-            # Пользователь в админке и выбрал пару или другую опцию
-            reply_markup = build_main_menu(user_id)
-            await update.message.reply_text(
-                "Сначала выйдите из меню админа!",
-                reply_markup=reply_markup
-            )
-            return ADMIN_STATE
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
+    if in_admin_mode:
+        logger.info(f"Пользователь {user_id} в админке, перенаправляем в админ-панель")
+        from ex_admin import build_main_menu
+        reply_markup = build_main_menu(user_id)
+        await update.message.reply_text(
+            "Ты в админке! Сначала выйди, чтобы работать в клиентском меню. Выбери раздел:",
+            reply_markup=reply_markup
+        )
+        return ADMIN_STATE
 
     choice = update.message.text
     logger.info(f"Выбор пользователя: {choice}")
 
-    _, _, referrer_id = get_user_data(user_id)
     admin_id = referrer_id if referrer_id else bot_config["owner_id"]
     admin_data = get_admin_data(admin_id)
 
-    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=3, timeout=10):
-        for attempt in range(retries):
-            try:
-                await asyncio.wait_for(
-                    context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup),
-                    timeout=timeout
-                )
-                logger.info(f"Сообщение успешно отправлено в чат {chat_id} с попытки {attempt + 1}")
-                return True
-            except asyncio.TimeoutError:
-                logger.warning(f"Тайм-аут при отправке сообщения в чат {chat_id}, попытка {attempt + 1} из {retries}")
-            except telegram.error.TimedOut as e:
-                logger.warning(f"Telegram TimedOut в чат {chat_id}, попытка {attempt + 1} из {retries}: {str(e)}")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке сообщения в чат {chat_id}: {str(e)}")
-                break
-            if attempt < retries - 1:
-                await asyncio.sleep(2)  # Пауза между попытками
-        logger.error(f"Не удалось отправить сообщение в чат {chat_id} после {retries} попыток")
-        return False
+    # Отладка active_order
+    logger.debug(f"active_order для user_id={user_id}: {active_order}, тип: {type(active_order)}")
+    
+    # Проверка прав доступа к админке
+    is_owner = str(user_id) == bot_config["owner_id"]
+    has_admin_expiry = False
+    if active_order:
+        try:
+            active_order_dict = json.loads(active_order) if isinstance(active_order, str) else active_order
+            has_admin_expiry = isinstance(active_order_dict, dict) and 'admin_expiry' in active_order_dict
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error(f"Ошибка парсинга active_order для user_id={user_id}: {str(e)}, active_order={active_order}")
+            active_order_dict = {}
+            has_admin_expiry = False
 
-    if (str(user_id) == bot_config["owner_id"] or (get_user_data(user_id)[0] and 'admin_expiry' in json.loads(get_user_data(user_id)[0]))) and choice == "Админка":
+    if (is_owner or has_admin_expiry) and choice == "Админка":
         logger.info("Отправка кнопки для входа в админку")
         reply_markup = build_admin_entry_menu()
         await send_message_with_retry(
+            context,
             chat_id=user_id,
             text="Нажми ниже, чтобы войти в админ-панель:",
             reply_markup=reply_markup
@@ -207,6 +228,7 @@ async def choose_operation(update, context):
         logger.info("Возврат к выбору операции")
         reply_markup = build_client_menu(user_id)
         await send_message_with_retry(
+            context,
             chat_id=user_id,
             text=bot_config["messages"]["welcome"].format(name=update.message.from_user.first_name),
             reply_markup=reply_markup
@@ -215,15 +237,17 @@ async def choose_operation(update, context):
     elif choice not in admin_data['active_pairs']:
         logger.info("Некорректный выбор, просьба выбрать из предложенных")
         await send_message_with_retry(
+            context,
             chat_id=user_id,
             text="Пожалуйста, выберите одну из предложенных опций ниже."
         )
         return CHOOSING
 
-    context.user_data.setdefault('user_data', {})  # Инициализируем, если нет
+    context.user_data.setdefault('user_data', {})
     context.user_data['user_data']['operation'] = choice
     logger.info("Отправка запроса суммы")
     await send_message_with_retry(
+        context,
         chat_id=user_id,
         text=bot_config["messages"]["amount_prompt"].format(operation=choice),
         reply_markup=build_amount_menu()
@@ -235,29 +259,36 @@ from pytils import numeral  # Добавляем импорт в начало ф
 
 async def get_amount(update, context):
     user_id = update.message.from_user.id
-    logger.debug(f"Получен ввод суммы от {user_id}: {update.message.text}")
+    logger.debug(f"Получен ввод суммы от {user_id}: '{update.message.text}'")
+    
     if update.message.text == "Назад":
+        context.user_data.pop('user_data', None)
         reply_markup = build_client_menu(user_id)
         await update.message.reply_text(
             bot_config["messages"]["welcome"].format(name=update.message.from_user.first_name),
             reply_markup=reply_markup
         )
+        logger.info(f"Возврат в CHOOSING для {user_id}")
         return CHOOSING
 
-    _, _, referrer_id = get_user_data(user_id)
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
     admin_id = referrer_id if referrer_id else bot_config["owner_id"]
     admin_data = get_admin_data(admin_id)
 
     try:
-        amount = float(update.message.text)
+        amount = float(update.message.text.strip())
         logger.debug(f"Сумма {amount} успешно преобразована для {user_id}")
+        
         if amount <= 0:
             await update.message.reply_text(bot_config["messages"]["negative_amount"])
+            logger.info(f"Отрицательная сумма, остаёмся в AMOUNT для {user_id}")
             return AMOUNT
         if amount > 1_000_000_000:
             await update.message.reply_text("Сумма слишком большая! Максимум — 1 миллиард.")
+            logger.info(f"Сумма превышает лимит, остаёмся в AMOUNT для {user_id}")
             return AMOUNT
-        context.user_data.setdefault('user_data', {})  # Инициализируем, если нет
+        
+        context.user_data.setdefault('user_data', {})
         context.user_data['user_data']['amount'] = amount
 
         operation = context.user_data['user_data']['operation']
@@ -266,54 +297,71 @@ async def get_amount(update, context):
         context.user_data['user_data']['result'] = result
         logger.debug(f"Результат расчёта для {operation}: {result}")
 
-        formatted_result = "{:,}".format(int(result)).replace(",", ".")
-        if '→' in operation:
-            currency_raw = operation.split('→')[1].strip()
-        elif '-' in operation:
-            currency_raw = operation.split('-')[1].strip()
-        else:
-            currency_raw = "unknown"
-        currency_base = currency_raw.split()[0].lower()
-        currency_corrections = {
-            "рубли": "рубль",
-            "рупии": "рупия",
-            "донги": "донг",
-            "юани": "юань",
-            "баты": "бат",
-            "usdt": "USDT"
-        }
-        currency_root = currency_corrections.get(currency_base, currency_base)
-        if currency_root == "usdt":
-            currency = "USDT"
-        else:
-            # Исправляем склонение для каждой валюты
-            if currency_root == "рубль":
-                currency = numeral.choose_plural(int(result), ("рубль", "рубля", "рублей"))
-            elif currency_root == "рупия":
-                currency = numeral.choose_plural(int(result), ("рупия", "рупии", "рупий"))
-            elif currency_root == "донг":
-                currency = numeral.choose_plural(int(result), ("донг", "донга", "донгов"))
-            elif currency_root == "юань":
-                currency = numeral.choose_plural(int(result), ("юань", "юаня", "юаней"))
-            elif currency_root == "бат":
-                currency = numeral.choose_plural(int(result), ("бат", "бата", "батов"))
-            else:
-                currency = currency_root  # Если валюта неизвестна, оставляем как есть
-
+        # Форматируем результат: до миллиона — без изменений, миллионы — с точками
+        formatted_result = str(int(result)) if int(result) < 1000000 else "{:,}".format(int(result)).replace(",", ".")
+        currency = get_currency(operation, result)
+        
         reply_markup = build_location_menu(user_id)
-        await update.message.reply_text(
-            f"Вы получите {formatted_result} {currency}.\nКуда доставить деньги? Выберите локацию:",
+        logger.debug(f"Меню локаций построено для {user_id}")
+        
+        text = f"Вы получите {formatted_result} {currency}.\nКуда доставить деньги? Выберите локацию:"
+        logger.debug(f"Текст сообщения: {text}")
+        
+        success = await send_message_with_retry(
+            context,
+            chat_id=user_id,
+            text=text,
             reply_markup=reply_markup
         )
-        logger.debug(f"Сообщение о выборе локации отправлено пользователю {user_id}")
+        logger.debug(f"Результат отправки: {success}")
+        
+        if not success:
+            logger.error(f"Не удалось отправить сообщение о локации для {user_id}")
+            await update.message.reply_text("Ошибка при отправке сообщения. Попробуйте снова.")
+            return AMOUNT
+        
+        logger.info(f"Успешно переходим в LOCATION для {user_id}")
         return LOCATION
-    except ValueError:
-        await update.message.reply_text(bot_config["messages"]["invalid_amount"])
+    except ValueError as ve:
+        logger.debug(f"ValueError в get_amount для {user_id}: {str(ve)}")
+        await send_message_with_retry(
+            context,
+            chat_id=user_id,
+            text=bot_config["messages"]["invalid_amount"]
+        )
         return AMOUNT
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка в get_amount для {user_id}: {str(e)}")
+        await update.message.reply_text("Произошла ошибка. Попробуйте снова.")
+        return AMOUNT
+
+# Новая функция для получения валюты с правильным склонением
+def get_currency(operation, result):
+    currency_raw = operation.split('→')[1].strip() if '→' in operation else "unknown"
+    currency_base = currency_raw.split()[0].lower()
+    currency_corrections = {
+        "рубли": "рубль", "рупии": "рупия", "донги": "донг", "юани": "юань", "баты": "бат", "usdt": "USDT"
+    }
+    currency_root = currency_corrections.get(currency_base, currency_base)
+    if currency_root == "usdt":
+        return "USDT"
+    else:
+        if currency_root == "рубль":
+            return numeral.choose_plural(int(result), ("рубль", "рубля", "рублей"))
+        elif currency_root == "рупия":
+            return numeral.choose_plural(int(result), ("рупия", "рупии", "рупий"))
+        elif currency_root == "донг":
+            return numeral.choose_plural(int(result), ("донг", "донга", "донгов"))
+        elif currency_root == "юань":
+            return numeral.choose_plural(int(result), ("юань", "юаня", "юаней"))
+        elif currency_root == "бат":
+            return numeral.choose_plural(int(result), ("бат", "бата", "батов"))
+        else:
+            return currency_root
 
 async def get_location(update, context):
     user_id = update.message.from_user.id
-    _, _, referrer_id = get_user_data(user_id)
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
     admin_id = referrer_id if referrer_id else bot_config["owner_id"]
     admin_data = get_admin_data(admin_id)
 
@@ -331,24 +379,48 @@ async def get_location(update, context):
 
     context.user_data['user_data']['location'] = location
     reply_markup = build_fine_location_menu()
-    await update.message.reply_text(
-        bot_config["messages"]["fine_location_prompt"],
+    await send_message_with_retry(
+        context,
+        chat_id=user_id,
+        text=bot_config["messages"]["fine_location_prompt"],
         reply_markup=reply_markup
     )
     return FINE_LOCATION
 
 async def get_fine_location(update, context):
     user_id = update.message.from_user.id
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
+    admin_id = referrer_id if referrer_id else bot_config["owner_id"]
+
+    if not context.user_data.get('user_data'):
+        logger.warning(f"Нет user_data для user_id={user_id}, возвращаем в главное меню")
+        reply_markup = build_client_menu(user_id)
+        await send_message_with_retry(
+            context,
+            chat_id=user_id,
+            text="Что-то пошло не так. Выбери операцию заново:",
+            reply_markup=reply_markup
+        )
+        return CHOOSING
+
     operation = context.user_data['user_data']['operation']
     amount = context.user_data['user_data']['amount']
     result = context.user_data['user_data']['result']
     location = context.user_data['user_data']['location']
 
     if not check_request_limit(user_id):
-        message_text = bot_config["messages"]["limit_exceeded"].format(limit=bot_config["request_limit"])
-        await update.message.reply_text(message_text)
+        await send_message_with_retry(
+            context,
+            chat_id=user_id,
+            text=bot_config["messages"]["limit_exceeded"].format(limit=bot_config["request_limit"])
+        )
         reply_markup = build_client_menu(user_id)
-        await update.message.reply_text("Выберите операцию:", reply_markup=reply_markup)
+        await send_message_with_retry(
+            context,
+            chat_id=user_id,
+            text="Выберите операцию:",
+            reply_markup=reply_markup
+        )
         return CHOOSING
 
     if update.message.location:
@@ -360,158 +432,107 @@ async def get_fine_location(update, context):
     elif update.message.text == "Пропустить":
         fine_location = "Не указано"
     elif update.message.text == "Назад":
-        currency = bot_config["currencies"].get(operation, "unknown")
         reply_markup = build_location_menu(user_id)
-        await update.message.reply_text(
-            bot_config["messages"]["location_prompt"].format(result=result, currency=currency),
+        await send_message_with_retry(
+            context,
+            chat_id=user_id,
+            text=f"Вы получите {int(result)} {get_currency(operation, result)}. Куда доставить деньги? Выберите локацию:",
             reply_markup=reply_markup
         )
         return LOCATION
     else:
-        await update.message.reply_text(
-            "Пожалуйста, отправьте геолокацию, ссылку на Google Maps или нажмите 'Пропустить'."
+        await send_message_with_retry(
+            context,
+            chat_id=user_id,
+            text="Пожалуйста, отправьте геолокацию, ссылку на Google Maps или нажмите 'Пропустить'."
         )
         return FINE_LOCATION
 
-    context.user_data['user_data']['fine_location'] = fine_location
-    active_order = {
+    # Формируем заявку
+    active_order_dict = {
         'operation': operation,
         'amount': amount,
         'result': result,
         'location': location,
         'fine_location': fine_location
     }
+    if active_order:
+        try:
+            current_order = json.loads(active_order)
+            if 'admin_expiry' in current_order:
+                active_order_dict['admin_expiry'] = current_order['admin_expiry']
+        except json.JSONDecodeError:
+            logger.error(f"Ошибка парсинга active_order для user_id={user_id}: {active_order}")
 
-    async def send_message_with_retry(chat_id, text, parse_mode=None, reply_markup=None, retries=3, timeout=10):
-        for attempt in range(retries):
-            try:
-                await asyncio.wait_for(
-                    context.bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, reply_markup=reply_markup),
-                    timeout=timeout
-                )
-                logger.info(f"Сообщение успешно отправлено в чат {chat_id} с попытки {attempt + 1}")
-                return True
-            except asyncio.TimeoutError:
-                logger.warning(f"Тайм-аут при отправке сообщения в чат {chat_id}, попытка {attempt + 1} из {retries}")
-            except telegram.error.TimedOut as e:
-                logger.warning(f"Telegram TimedOut в чат {chat_id}, попытка {attempt + 1} из {retries}: {str(e)}")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке сообщения в чат {chat_id}: {str(e)}")
-                break
-            if attempt < retries - 1:
-                await asyncio.sleep(2)  # Пауза между попытками
-        logger.error(f"Не удалось отправить сообщение в чат {chat_id} после {retries} попыток")
-        return False
+    save_user_data(user_id, active_order_dict, referrer_id=referrer_id, in_admin_mode=in_admin_mode)  # Передаём словарь
+    log_request(user_id)
 
-    try:
-        save_user_data(user_id, active_order)
-        log_request(user_id)
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении данных заявки для user_id={user_id}: {str(e)}")
-        await send_message_with_retry(
-            chat_id=user_id,
-            text="Ошибка при сохранении заявки. Попробуй снова или обратись в поддержку.",
-            reply_markup=build_client_menu(user_id)
-        )
-        await send_message_with_retry(
-            chat_id=bot_config["owner_id"],
-            text=f"Ошибка сохранения заявки от user_id={user_id}: {str(e)}"
-        )
-        return CHOOSING
+    # Форматируем числа: до миллиона — без изменений, миллионы — с точками
+    formatted_amount = str(int(amount)) if int(amount) < 1000000 else "{:,}".format(int(amount)).replace(",", ".")
+    formatted_result = str(int(result)) if int(result) < 1000000 else "{:,}".format(int(result)).replace(",", ".")
+    currency = get_currency(operation, result)
 
-    try:
-        # Форматируем сумму
-        formatted_result = "{:,}".format(int(result)).replace(",", ".")
-        currency_raw = operation.split('→')[1].strip() if '→' in operation else "unknown"
-        currency_base = currency_raw.split()[0].lower()
-        currency_corrections = {
-            "рубли": "рубль",
-            "рупии": "рупия",
-            "донги": "донг",
-            "юани": "юань",
-            "баты": "бат",
-            "usdt": "USDT"
-        }
-        currency_root = currency_corrections.get(currency_base, currency_base)
-        if currency_root == "usdt":
-            currency = "USDT"
-        else:
-            # Исправляем склонение для каждой валюты
-            if currency_root == "рубль":
-                currency = numeral.choose_plural(int(result), ("рубль", "рубля", "рублей"))
-            elif currency_root == "рупия":
-                currency = numeral.choose_plural(int(result), ("рупия", "рупии", "рупий"))
-            elif currency_root == "донг":
-                currency = numeral.choose_plural(int(result), ("донг", "донга", "донгов"))
-            elif currency_root == "юань":
-                currency = numeral.choose_plural(int(result), ("юань", "юаня", "юаней"))
-            elif currency_root == "бат":
-                currency = numeral.choose_plural(int(result), ("бат", "бата", "батов"))
-            else:
-                currency = currency_root
+    # Отправляем подтверждение пользователю
+    reply_markup = build_client_menu(user_id)
+    user_message = bot_config["messages"]["request_accepted"].format(
+        operation=operation,
+        amount=formatted_amount,
+        result=formatted_result,
+        currency=currency,
+        location=location,
+        fine_location=fine_location
+    )
+    await send_message_with_retry(
+        context,
+        chat_id=user_id,
+        text=user_message,
+        reply_markup=reply_markup
+    )
 
-        # Отправляем подтверждение пользователю
-        reply_markup = build_client_menu(user_id)
-        # Исправляем шаблон, убираем .2f, так как result уже отформатирован
-        user_message = bot_config["messages"]["request_accepted"].replace("{result:.2f}", "{result}").format(
-            operation=operation,
-            amount=amount,
-            result=formatted_result,
-            currency=currency,
-            location=location,
-            fine_location=fine_location
-        )
-        if not await send_message_with_retry(
-            chat_id=user_id,
-            text=user_message,
-            reply_markup=reply_markup
-        ):
-            logger.warning(f"Не удалось отправить подтверждение пользователю {user_id}")
+    # Определяем, кому отправлять уведомление
+    if in_admin_mode and referrer_id == user_id:  # Админ тестирует бота
+        admin_chat_id = user_id
+    else:
+        admin_chat_id = referrer_id if referrer_id else bot_config["owner_id"]
 
-        # Формируем и отправляем уведомление админу
-        active_order_data, _, referrer_id = get_user_data(user_id)
-        admin_chat_id = str(referrer_id) if referrer_id else bot_config["owner_id"]
-        user = update.message.from_user
-        user_link = f"@{user.username}" if user.username else f"[Пользователь](tg://user?id={user_id})"
+    # Функция экранирования для MarkdownV2
+    def escape_md(text):
+        special_chars = r'_*[]()~`>#+-=|{}.!'
+        for char in special_chars:
+            text = text.replace(char, f"\\{char}")
+        return text
 
-        def escape_md(text):
-            special_chars = r'_*[]()~`>#+-=|{}.!'
-            return ''.join(f"\\{char}" if char in special_chars else char for char in str(text))
+    # Формируем user_link без лишнего экранирования ссылки
+    user = update.message.from_user
+    if user.username:
+        user_link = f"@{user.username}"  # В HTML экранирование не нужно для @username
+    else:
+        user_link = f'<a href="tg://user?id={user_id}">Пользователь</a>'
 
-        admin_message = bot_config["messages"]["admin_request"].format(
-            user_link=escape_md(user_link),
-            operation=escape_md(operation),
-            amount=escape_md(str(amount)),
-            result=escape_md(f"{formatted_result} {currency}"),
-            location=escape_md(location),
-            fine_location=escape_md(fine_location)
-        )
+    # Форматируем сообщение в HTML
+    admin_message = bot_config["messages"]["admin_request"].format(
+        user_link=user_link,
+        operation=operation,
+        amount=formatted_amount,
+        result=f"{formatted_result} {currency}",
+        location=location,
+        fine_location=fine_location
+    )
+    logger.debug(f"Текст уведомления админу (HTML): {admin_message}")
 
-        if not await send_message_with_retry(
-            chat_id=admin_chat_id,
-            text=admin_message,
-            parse_mode='MarkdownV2'
-        ):
-            logger.error(f"Не удалось отправить уведомление админу {admin_chat_id}")
-            await send_message_with_retry(
-                chat_id=bot_config["owner_id"],
-                text=f"Не удалось уведомить админа {admin_chat_id} о заявке от {user_link}"
-            )
-        else:
-            logger.info(f"Уведомление о заявке успешно отправлено админу {admin_chat_id}")
+    success = await send_message_with_retry(
+        context,
+        chat_id=admin_chat_id,
+        text=admin_message,
+        parse_mode='HTML'  # Меняем на HTML
+    )
+    if success:
+        logger.info(f"Уведомление отправлено в чат {admin_chat_id}")
+    else:
+        logger.error(f"Не удалось отправить уведомление админу в чат {admin_chat_id}")
 
-    except Exception as e:
-        logger.error(f"Ошибка при обработке заявки для user_id={user_id}: {str(e)}")
-        await send_message_with_retry(
-            chat_id=user_id,
-            text="Извините, произошла ошибка при обработке заявки. Попробуйте снова или обратитесь в поддержку.",
-            reply_markup=build_client_menu(user_id)
-        )
-        await send_message_with_retry(
-            chat_id=bot_config["owner_id"],
-            text=f"Ошибка при обработке заявки от user_id={user_id}: {str(e)}"
-        )
-
+    # Очищаем временные данные
+    context.user_data.pop('user_data', None)
     return CHOOSING
 
 async def cancel(update, context):
@@ -546,14 +567,11 @@ async def reload_config(update, context):
         await update.message.reply_text(f"Ошибка при перезагрузке конфигурации: {str(e)}")
 
 async def check_subscriptions(application):
-    """Фоновая задача для проверки подписок и отправки уведомлений"""
     from bot_config import bot_config
-    stop_event = asyncio.Event()  # Создаём событие для остановки
-
-    # Сохраняем stop_event в application, чтобы можно было получить его при остановке
+    stop_event = asyncio.Event()
     application.stop_event = stop_event
 
-    while not stop_event.is_set():  # Цикл работает, пока не установлен stop_event
+    while not stop_event.is_set():
         try:
             conn = sqlite3.connect('database.db')
             c = conn.cursor()
@@ -561,11 +579,11 @@ async def check_subscriptions(application):
             users = c.fetchall()
             conn.close()
 
-            current_time = datetime.now()
+            current_time = datetime.now(pytz.UTC)
             for user_id, active_order in users:
                 active_order_dict = json.loads(active_order)
                 if 'admin_expiry' in active_order_dict:
-                    expiry = datetime.strptime(active_order_dict['admin_expiry'], '%Y-%m-%d %H:%M:%S')
+                    expiry = datetime.strptime(active_order_dict['admin_expiry'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
                     time_left = expiry - current_time
                     if timedelta(hours=23) < time_left <= timedelta(hours=24):
                         try:
@@ -579,7 +597,6 @@ async def check_subscriptions(application):
         except Exception as e:
             logger.error(f"Ошибка в check_subscriptions: {str(e)}")
         
-        # Ждём интервал, но проверяем stop_event каждую секунду
         for _ in range(bot_config["subscription_check_interval"]):
             if stop_event.is_set():
                 break
@@ -587,8 +604,11 @@ async def check_subscriptions(application):
 
     logger.info("Фоновая задача check_subscriptions завершена")
 
-def main():
-    init_db()  # load_config() уже вызван в bot_config.py
+async def main():
+    init_db()  # Конфиг уже загружен в bot_config.py
+
+    # Инициализируем приложение
+    await application.initialize()
 
     client_handler = ConversationHandler(
         entry_points=[
@@ -614,27 +634,64 @@ def main():
     def signal_handler(sig, frame):
         logger.info("Получен сигнал завершения, останавливаем бота...")
         if hasattr(application, 'stop_event'):
-            application.stop_event.set()  # Устанавливаем stop_event
-        application.stop_running()
+            application.stop_event.set()
+        asyncio.get_event_loop().create_task(application.stop())
+        asyncio.get_event_loop().create_task(application.shutdown())
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Добавляем post_init для запуска фоновой задачи
+    # Запускаем фоновую задачу
     async def post_init(application):
-        asyncio.ensure_future(check_subscriptions(application))
+        asyncio.create_task(check_subscriptions(application))
         logger.info("Фоновая задача check_subscriptions запущена")
 
     application.post_init = post_init
 
     logger.info("Запуск бота в режиме polling...")
-    while True:
+    max_retries = 10
+    base_delay = 5
+    max_delay = 300
+    retry_count = 0
+
+    while retry_count < max_retries:
         try:
-            application.run_polling(allowed_updates=["message", "callback_query"])
+            await application.start()  # Явно стартуем приложение
+            await application.updater.start_polling(
+                allowed_updates=["message", "callback_query"],
+                drop_pending_updates=True
+            )
+            # Ожидаем завершения (например, по сигналу)
+            await application.stop_event.wait()
+            await application.updater.stop()
+            await application.stop()
+            break  # Успешное завершение
+        except (NetworkError, TimedOut, TelegramError) as e:
+            retry_count += 1
+            logger.error(f"Ошибка сети: {str(e)}. Попытка {retry_count}/{max_retries}")
+            delay = min(base_delay * (2 ** (retry_count - 1)), max_delay)
+            logger.info(f"Ожидание {delay} секунд перед перезапуском...")
+            await asyncio.sleep(delay)
+            # Останавливаем и переинициализируем только при необходимости
+            try:
+                await application.updater.stop()
+                await application.stop()
+            except Exception as stop_error:
+                logger.warning(f"Ошибка при остановке: {str(stop_error)}")
+            await application.initialize()  # Переинициализируем
         except Exception as e:
-            logger.error(f"Error: {e}. Restarting polling...")
-            time.sleep(5)  # Пауза перед перезапуском
+            logger.error(f"Критическая ошибка: {str(e)}. Остановка бота.")
+            await application.updater.stop()
+            await application.stop()
+            break
+
+    # Финальная остановка
+    try:
+        await application.shutdown()
+        logger.info("Бот завершил работу")
+    except Exception as shutdown_error:
+        logger.error(f"Ошибка при завершении работы: {str(shutdown_error)}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
