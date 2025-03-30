@@ -1,3 +1,4 @@
-python-telegram-bot==20.7
-pytils==0.4.1
-python-dotenv==1.0.1
+python-telegram-bot>=20.7
+pytz>=2023.3
+python-dotenv>=1.0.0
+pytils>=0.4.1
