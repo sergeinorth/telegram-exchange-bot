@@ -184,18 +184,18 @@ async def admin_callback(update, context):
     if choice == 'enter_admin':
         if str(user_id) != owner_id:
             if not active_order:
-                await query.message.reply_text("Бро, это только для админов!")
+                await query.message.reply_text("Эта функция доступна только администраторам!")
                 return ConversationHandler.END
             try:
                 active_order_dict = json.loads(active_order) if isinstance(active_order, str) else {}
                 if not isinstance(active_order_dict, dict) or 'admin_expiry' not in active_order_dict:
-                    await query.message.reply_text("Бро, это только для админов!")
+                    await query.message.reply_text("Эта функция доступна только администраторам!")
                     return ConversationHandler.END
                 expiry = datetime.strptime(active_order_dict['admin_expiry'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
                 if datetime.now(pytz.UTC) > expiry:
                     active_order_dict.pop('admin_expiry', None)
                     save_user_data(user_id, active_order_dict, referrer_id, in_admin_mode=0)
-                    await query.message.reply_text("Бро, твоя админская подписка истекла!")
+                    await query.message.reply_text("Ваша административная подписка истекла!")
                     return ConversationHandler.END
             except (json.JSONDecodeError, TypeError) as e:
                 logger.error(f"Ошибка парсинга active_order для user_id={user_id}: {str(e)}, active_order={active_order}")
@@ -506,7 +506,7 @@ async def set_rate(update, context):
         new_rate = float(new_rate_input)
         if new_rate <= 0:
             logger.info("Введён некорректный курс (<= 0)")
-            await update.message.reply_text("Бро, курс должен быть больше 0! Попробуй ещё раз.")
+            await update.message.reply_text("Курс должен быть больше 0! Попробуйте ещё раз.")
             return SET_RATE
         
         rate_key = context.user_data.get('editing_rate')
@@ -526,21 +526,21 @@ async def set_rate(update, context):
         else:
             logger.error("Не выбрана пара для редактирования")
             await update.message.reply_text(
-                "Ошибка: не выбрана пара для редактирования. Попробуй снова.",
+                "Ошибка: не выбрана пара для редактирования. Попробуйте снова.",
                 reply_markup=build_rates_menu(admin_id)
             )
             return EDIT_RATES
     except ValueError:
         logger.info("Введено некорректное значение курса")
         await update.message.reply_text(
-            "Бро, введи число (например, 0.85)! Попробуй ещё раз.",
+            "Пожалуйста, введите число (например, 0.85)! Попробуйте ещё раз.",
             reply_markup=build_rates_menu(admin_id)
         )
         return SET_RATE
     except Exception as e:
         logger.error(f"Ошибка в set_rate: {str(e)}")
         await update.message.reply_text(
-            "Произошла ошибка при установке курса. Попробуй снова.",
+            "Произошла ошибка при установке курса. Попробуйте снова.",
             reply_markup=build_main_menu(user_id)
         )
         return ADMIN_STATE
