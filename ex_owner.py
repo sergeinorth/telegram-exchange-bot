@@ -21,7 +21,7 @@ async def activate_otp(update, context):
     args = context.args
 
     if not args or len(args) != 1:
-        await update.message.reply_text("Используй: /otp <код>")
+        await update.message.reply_text("Используйте: /otp <код>")
         return
 
     otp_code = args[0].strip()
@@ -76,7 +76,7 @@ async def activate_otp(update, context):
         logger.debug(f"Данные сохранены: user_id={user_id}, active_order_dict={active_order_dict}")
     except Exception as e:
         logger.error(f"Ошибка при сохранении данных для user_id={user_id}: {str(e)}")
-        await update.message.reply_text("Ошибка при сохранении данных. Попробуй снова или пиши в поддержку.")
+        await update.message.reply_text("Ошибка при сохранении данных. Попробуйте снова или обратитесь в поддержку.")
         return
 
     # Проверяем, что данные сохранились
@@ -84,7 +84,7 @@ async def activate_otp(update, context):
     logger.debug(f"Проверка после сохранения: active_order_check={active_order_check}, referrer_id_check={referrer_id_check}, in_admin_mode_check={in_admin_mode_check}")
     if not active_order_check:
         logger.error(f"После сохранения active_order пустой для user_id={user_id}")
-        await update.message.reply_text("Ошибка при активации OTP. Попробуй снова или пиши в поддержку.")
+        await update.message.reply_text("Ошибка при активации OTP. Попробуйте снова или обратитесь в поддержку.")
         return
 
     try:
@@ -92,12 +92,12 @@ async def activate_otp(update, context):
         logger.debug(f"Проверка active_order_check_dict={active_order_check_dict}, type={type(active_order_check_dict)}")
     except json.JSONDecodeError:
         logger.error(f"Ошибка парсинга active_order_check для user_id={user_id}: {active_order_check}")
-        await update.message.reply_text("Ошибка проверки данных после активации. Попробуй снова или пиши в поддержку.")
+        await update.message.reply_text("Ошибка проверки данных после активации. Попробуйте снова или обратитесь в поддержку.")
         return
 
     if 'admin_expiry' not in active_order_check_dict or referrer_id_check != user_id or not in_admin_mode_check:
         logger.error(f"Ошибка в сохранении данных для user_id={user_id}: active_order={active_order_check}, referrer_id={referrer_id_check}, in_admin_mode={in_admin_mode_check}")
-        await update.message.reply_text("Ошибка при настройке админки. Попробуй снова или пиши в поддержку.")
+        await update.message.reply_text("Ошибка при настройке админки. Попробуйте снова или обратитесь в поддержку.")
         return
 
     # Удаляем OTP после успешной активации
@@ -107,30 +107,30 @@ async def activate_otp(update, context):
     from exbot import build_client_menu
     reply_markup = build_client_menu(user_id)
     await update.message.reply_text(
-        f"Код активирован, бро! Ты теперь админ до {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}. "
-        "Используй кнопку 'Админка' в главном меню!",
+        f"Код успешно активирован! Вы получили права администратора до {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}. "
+        "Используйте кнопку 'Админка' в главном меню для управления.",
         reply_markup=reply_markup
     )
 
     # Уведомляем владельца
     user = update.message.from_user
-    user_link = f"@{user.username}" if user.username else f"[пользователь](tg://user?id={user_id})"
+    user_link = f"@{user.username}" if user.username else f'<a href="tg://user?id={user_id}">Пользователь</a>'
     await context.bot.send_message(
-        chat_id=OWNER_ID,
-        text=f"Новый админ активирован: {user_link}\nСрок действия подписки: до {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}",
-        parse_mode='Markdown'
-    )
+    chat_id=OWNER_ID,
+    text=f"Активирован новый администратор: {user_link}\nСрок действия прав: до {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}",
+    parse_mode='HTML'
+)
 
 async def check_subscription(update, context):
     user_id = update.message.from_user.id if update.message else update.callback_query.from_user.id
-    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)  # Исправлено
+    active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
     if not active_order or 'admin_expiry' not in json.loads(active_order):
-        text = "Бро, у тебя нет активной админской подписки!"
+        text = "У вас нет активной административной подписки!"
     else:
         expiry_str = json.loads(active_order)['admin_expiry']
         expiry = datetime.strptime(expiry_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
         if datetime.now(pytz.UTC) > expiry:
-            text = "Бро, твоя админская подписка истекла! Пора обновить код."
+            text = "Ваша административная подписка истекла! Обновите код для продолжения."
             active_order_dict = json.loads(active_order)
             active_order_dict.pop('admin_expiry', None)
             save_user_data(user_id, active_order_dict)
@@ -138,7 +138,7 @@ async def check_subscription(update, context):
             remaining_time = expiry - datetime.now(pytz.UTC)
             days_left = remaining_time.days
             hours_left = remaining_time.seconds // 3600
-            text = f"Бро, твоя подписка активна до {expiry_str}. Осталось {days_left} дн. и {hours_left} ч."
+            text = f"Ваша подписка активна до {expiry_str}. Осталось {days_left} дн. и {hours_left} ч."
 
     if update.message:
         await update.message.reply_text(text)
