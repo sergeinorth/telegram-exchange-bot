@@ -40,67 +40,59 @@ async def activate_otp(update, context):
         delete_otp(otp_code)
         return
 
+    # Получаем текущие данные пользователя
     active_order, request_count, referrer_id, in_admin_mode = get_user_data(user_id)
     logger.debug(f"Текущие данные: active_order={active_order}, type={type(active_order)}, referrer_id={referrer_id}, in_admin_mode={in_admin_mode}")
 
-    if not active_order:
-        active_order_dict = {}
-        logger.debug("active_order пустой, инициализируем пустой словарь")
-    else:
-        try:
-            active_order_dict = json.loads(active_order)
-            logger.debug(f"Распаршенный active_order_dict={active_order_dict}, type={type(active_order_dict)}")
-            if not isinstance(active_order_dict, dict):  # Проверяем тип
-                logger.error(f"active_order_dict не словарь после json.loads: {active_order_dict}, type={type(active_order_dict)}")
-                active_order_dict = {}
-        except json.JSONDecodeError as e:
-            logger.error(f"Ошибка парсинга active_order для user_id={user_id}: {str(e)}, active_order={active_order}")
-            active_order_dict = {}
-            logger.debug("После ошибки парсинга: active_order_dict={}, type={type(active_order_dict)}")
-
-    logger.debug(f"Перед добавлением admin_expiry: active_order_dict={active_order_dict}, type={type(active_order_dict)}")
-    if not isinstance(active_order_dict, dict):
-        logger.error(f"active_order_dict не словарь перед добавлением admin_expiry: {active_order_dict}, type={type(active_order_dict)}")
-        active_order_dict = {}
+    # Инициализируем пустой словарь или парсим существующий active_order
     try:
-        active_order_dict['admin_expiry'] = expiry_date.strftime('%Y-%m-%d %H:%M:%S')
-    except TypeError as e:
-        logger.error(f"TypeError при добавлении admin_expiry: {str(e)}, active_order_dict={active_order_dict}, type={type(active_order_dict)}")
-        raise
-    logger.debug(f"После добавления admin_expiry: active_order_dict={active_order_dict}, type={type(active_order_dict)}")
+        if active_order and isinstance(active_order, str):
+            active_order_dict = json.loads(active_order)
+            if not isinstance(active_order_dict, dict):
+                logger.warning(f"active_order не является словарем: {active_order_dict}, создаем новый")
+                active_order_dict = {}
+        else:
+            active_order_dict = {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка парсинга active_order: {e}")
+        active_order_dict = {}
 
+    # Устанавливаем дату истечения прав админа
+    active_order_dict['admin_expiry'] = expiry_date.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Устанавливаем referrer_id равным user_id и in_admin_mode=1
     referrer_id = user_id
 
+    # Сохраняем данные с явным указанием всех параметров
     try:
         save_user_data(user_id, active_order_dict, referrer_id=referrer_id, in_admin_mode=1)
         logger.debug(f"Данные сохранены: user_id={user_id}, active_order_dict={active_order_dict}")
     except Exception as e:
-        logger.error(f"Ошибка при сохранении данных для user_id={user_id}: {str(e)}")
+        logger.error(f"Ошибка при сохранении данных: {str(e)}")
         await update.message.reply_text("Ошибка при сохранении данных. Попробуйте снова или обратитесь в поддержку.")
         return
 
-    # Проверяем, что данные сохранились
+    # Проверяем, что данные действительно сохранились
     active_order_check, _, referrer_id_check, in_admin_mode_check = get_user_data(user_id)
     logger.debug(f"Проверка после сохранения: active_order_check={active_order_check}, referrer_id_check={referrer_id_check}, in_admin_mode_check={in_admin_mode_check}")
+    
     if not active_order_check:
         logger.error(f"После сохранения active_order пустой для user_id={user_id}")
         await update.message.reply_text("Ошибка при активации OTP. Попробуйте снова или обратитесь в поддержку.")
         return
 
     try:
-        active_order_check_dict = json.loads(active_order_check)
-        logger.debug(f"Проверка active_order_check_dict={active_order_check_dict}, type={type(active_order_check_dict)}")
-    except json.JSONDecodeError:
-        logger.error(f"Ошибка парсинга active_order_check для user_id={user_id}: {active_order_check}")
+        active_order_check_dict = json.loads(active_order_check) if isinstance(active_order_check, str) else active_order_check
+        if not isinstance(active_order_check_dict, dict) or 'admin_expiry' not in active_order_check_dict:
+            logger.error(f"Ошибка в проверке сохраненных данных: active_order_check_dict={active_order_check_dict}")
+            await update.message.reply_text("Ошибка проверки данных после активации. Повторно активируйте OTP.")
+            return
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.error(f"Ошибка парсинга active_order_check: {e}")
         await update.message.reply_text("Ошибка проверки данных после активации. Попробуйте снова или обратитесь в поддержку.")
         return
 
-    if 'admin_expiry' not in active_order_check_dict or referrer_id_check != user_id or not in_admin_mode_check:
-        logger.error(f"Ошибка в сохранении данных для user_id={user_id}: active_order={active_order_check}, referrer_id={referrer_id_check}, in_admin_mode={in_admin_mode_check}")
-        await update.message.reply_text("Ошибка при настройке админки. Попробуйте снова или обратитесь в поддержку.")
-        return
-
-    # Удаляем OTP после успешной активации
+    # Если все проверки прошли успешно, удаляем OTP и возвращаем успех
     delete_otp(otp_code)
 
     # Возвращаем меню клиента с кнопкой "Админка"
@@ -113,13 +105,17 @@ async def activate_otp(update, context):
     )
 
     # Уведомляем владельца
-    user = update.message.from_user
-    user_link = f"@{user.username}" if user.username else f'<a href="tg://user?id={user_id}">Пользователь</a>'
-    await context.bot.send_message(
-    chat_id=OWNER_ID,
-    text=f"Активирован новый администратор: {user_link}\nСрок действия прав: до {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}",
-    parse_mode='HTML'
-)
+    try:
+        user = update.message.from_user
+        user_link = f"@{user.username}" if user.username else f'<a href="tg://user?id={user_id}">Пользователь</a>'
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"Активирован новый администратор: {user_link}\nСрок действия прав: до {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке уведомления владельцу: {str(e)}")
+        # Не прерываем выполнение, так как главная функция уже выполнена
 
 async def check_subscription(update, context):
     user_id = update.message.from_user.id if update.message else update.callback_query.from_user.id
