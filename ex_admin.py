@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 from ex_owner import generate_otp, check_subscription
 from utils import get_user_data, save_otp_data, save_user_data, get_admin_data, save_admin_data
+from telegram.error import BadRequest
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -235,15 +236,20 @@ async def admin_callback(update, context):
         await query.message.delete()
         return ConversationHandler.END
 
-        # Остальной код остаётся без изменений
-
     elif choice == 'manage_location':
         keyboard = [
             [InlineKeyboardButton("Добавить", callback_data='add_location')],
             [InlineKeyboardButton("Удалить", callback_data='remove_location')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Что ты хочешь сделать с локациями?", reply_markup=reply_markup, parse_mode='Markdown')
+        try:
+            await query.edit_message_text("Что ты хочешь сделать с локациями?", reply_markup=reply_markup, parse_mode='Markdown')
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text("Что ты хочешь сделать с локациями?", reply_markup=reply_markup, parse_mode='Markdown')
         return ADMIN_STATE
 
     elif choice == 'manage_pair':
@@ -252,15 +258,36 @@ async def admin_callback(update, context):
             [InlineKeyboardButton("Удалить", callback_data='remove_pair')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Что ты хочешь сделать с парами?", reply_markup=reply_markup, parse_mode='Markdown')
+        try:
+            await query.edit_message_text("Что ты хочешь сделать с парами?", reply_markup=reply_markup, parse_mode='Markdown')
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text("Что ты хочешь сделать с парами?", reply_markup=reply_markup, parse_mode='Markdown')
         return ADMIN_STATE
 
     elif choice == 'add_location':
-        await query.edit_message_text("Введите новую локацию (например, 'Гоа'):")
+        try:
+            await query.edit_message_text("Введите новую локацию (например, 'Гоа'):")
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text("Введите новую локацию (например, 'Гоа'):")
         return ADD_LOCATION
 
     elif choice == 'add_pair':
-        await query.edit_message_text("Введите новую валютную пару (например, 'Рубли → Доллары'):")
+        try:
+            await query.edit_message_text("Введите новую валютную пару (например, 'Рубли → Доллары'):")
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text("Введите новую валютную пару (например, 'Рубли → Доллары'):")
         return ADD_PAIR
 
     elif choice == 'edit_rates':
@@ -276,45 +303,92 @@ async def admin_callback(update, context):
         admin_data = get_admin_data(admin_id)
         rates_text = "\n".join([f"*{k}*: {v:.2f}" for k, v in admin_data['rates'].items()])
         reply_markup = build_rates_menu(admin_id)
-        await query.edit_message_text(
-            f"📊 *Текущие курсы:*\n{rates_text}\nВыбери пару для редактирования:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        try:
+            await query.edit_message_text(
+                f"📊 *Текущие курсы:*\n{rates_text}\nВыбери пару для редактирования:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text(
+                    f"📊 *Текущие курсы:*\n{rates_text}\nВыбери пару для редактирования:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
         return SET_RATE
 
     elif choice == 'generate_otp':
         if str(user_id) != owner_id:
-            await query.edit_message_text("Только владелец может генерировать OTP!")
+            try:
+                await query.edit_message_text("Только владелец может генерировать OTP!")
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text("Только владелец может генерировать OTP!")
             return ADMIN_STATE
         keyboard = [
             [InlineKeyboardButton("7 дней", callback_data='generate_otp_7')],
             [InlineKeyboardButton("30 дней", callback_data='generate_otp_30')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Выбери срок действия OTP:", reply_markup=reply_markup, parse_mode='Markdown')
+        try:
+            await query.edit_message_text("Выбери срок действия OTP:", reply_markup=reply_markup, parse_mode='Markdown')
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text("Выбери срок действия OTP:", reply_markup=reply_markup, parse_mode='Markdown')
         return GENERATE_OTP
 
     elif choice == 'generate_otp_7':
         if str(user_id) == owner_id:
             otp, expiry = generate_otp(7)
             save_otp_data(otp, None, expiry.strftime('%Y-%m-%d %H:%M:%S'), 7)
-            await query.edit_message_text(
-                f"Сгенерирован OTP\nСрок действия: 7 дней\nКод: `/otp {otp}`\nСкопируй и отправь новому админу.",
-                reply_markup=build_main_menu(user_id),
-                parse_mode='Markdown'
-            )
+            try:
+                await query.edit_message_text(
+                    f"Сгенерирован OTP\nСрок действия: 7 дней\nКод: `/otp {otp}`\nСкопируй и отправь новому админу.",
+                    reply_markup=build_main_menu(user_id),
+                    parse_mode='Markdown'
+                )
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text(
+                        f"Сгенерирован OTP\nСрок действия: 7 дней\nКод: `/otp {otp}`\nСкопируй и отправь новому админу.",
+                        reply_markup=build_main_menu(user_id),
+                        parse_mode='Markdown'
+                    )
         return ADMIN_STATE
 
     elif choice == 'generate_otp_30':
         if str(user_id) == owner_id:
             otp, expiry = generate_otp(30)
             save_otp_data(otp, None, expiry.strftime('%Y-%m-%d %H:%M:%S'), 30)
-            await query.edit_message_text(
-                f"Сгенерирован OTP\nСрок действия: 30 дней\nКод: `/otp {otp}`\nСкопируй и отправь новому админу.",
-                reply_markup=build_main_menu(user_id),
-                parse_mode='Markdown'
-            )
+            try:
+                await query.edit_message_text(
+                    f"Сгенерирован OTP\nСрок действия: 30 дней\nКод: `/otp {otp}`\nСкопируй и отправь новому админу.",
+                    reply_markup=build_main_menu(user_id),
+                    parse_mode='Markdown'
+                )
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text(
+                        f"Сгенерирован OTP\nСрок действия: 30 дней\nКод: `/otp {otp}`\nСкопируй и отправь новому админу.",
+                        reply_markup=build_main_menu(user_id),
+                        parse_mode='Markdown'
+                    )
         return ADMIN_STATE
 
     elif choice == 'check_subscription':
@@ -324,12 +398,24 @@ async def admin_callback(update, context):
 
     elif choice == 'generate_ref_link':
         ref_link = f"https://t.me/goa_exchangeBot?start=ref_{user_id}"
-        await query.edit_message_text(
-            f'<a href="{ref_link}">Мой бот обменник</a>\nСкопируй и отправь друзьям!',
-            reply_markup=build_main_menu(user_id),
-            parse_mode='HTML',
-            disable_web_page_preview=True
-        )
+        try:
+            await query.edit_message_text(
+                f'<a href="{ref_link}">Мой бот обменник</a>\nСкопируй и отправь друзьям!',
+                reply_markup=build_main_menu(user_id),
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text(
+                    f'<a href="{ref_link}">Мой бот обменник</a>\nСкопируй и отправь друзьям!',
+                    reply_markup=build_main_menu(user_id),
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
         return ADMIN_STATE
 
     elif choice == 'broadcast':
@@ -340,16 +426,37 @@ async def admin_callback(update, context):
         from bot_config import load_config
         try:
             load_config()
-            await query.edit_message_text("Конфигурация успешно перезагружена!", reply_markup=build_main_menu(user_id))
+            try:
+                await query.edit_message_text("Конфигурация успешно перезагружена!", reply_markup=build_main_menu(user_id))
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text("Конфигурация успешно перезагружена!", reply_markup=build_main_menu(user_id))
             logger.info(f"Конфигурация перезагружена пользователем {user_id}")
         except Exception as e:
             logger.error(f"Ошибка при перезагрузке конфигурации: {str(e)}")
-            await query.edit_message_text(f"Ошибка при перезагрузке: {str(e)}", reply_markup=build_main_menu(user_id))
+            try:
+                await query.edit_message_text(f"Ошибка при перезагрузке: {str(e)}", reply_markup=build_main_menu(user_id))
+            except BadRequest as err:
+                if "Message is not modified" in str(err):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(err)}")
+                    await query.message.reply_text(f"Ошибка при перезагрузке: {str(e)}", reply_markup=build_main_menu(user_id))
         return ADMIN_STATE
 
     elif choice == 'back_to_main':
         reply_markup = build_main_menu(user_id)
-        await query.edit_message_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
+        try:
+            await query.edit_message_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
         return ADMIN_STATE
 
     elif choice.startswith('delete_pair_'):
@@ -362,9 +469,23 @@ async def admin_callback(update, context):
             if pair_to_delete in admin_data['rates']:
                 del admin_data['rates'][pair_to_delete]
             save_admin_data(admin_id, admin_data)
-            await query.edit_message_text(f"Пара '{pair_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
+            try:
+                await query.edit_message_text(f"Пара '{pair_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text(f"Пара '{pair_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
         else:
-            await query.edit_message_text("Пара не найдена!", reply_markup=build_main_menu(user_id))
+            try:
+                await query.edit_message_text("Пара не найдена!", reply_markup=build_main_menu(user_id))
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text("Пара не найдена!", reply_markup=build_main_menu(user_id))
         return ADMIN_STATE
 
     elif choice.startswith('delete_location_'):
@@ -375,15 +496,36 @@ async def admin_callback(update, context):
             if location_to_delete in admin_data['active_locations']:
                 admin_data['active_locations'].remove(location_to_delete)
             save_admin_data(admin_id, admin_data)
-            await query.edit_message_text(f"Локация '{location_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
+            try:
+                await query.edit_message_text(f"Локация '{location_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text(f"Локация '{location_to_delete}' удалена!", reply_markup=build_main_menu(user_id))
         else:
-            await query.edit_message_text("Локация не найдена!", reply_markup=build_main_menu(user_id))
+            try:
+                await query.edit_message_text("Локация не найдена!", reply_markup=build_main_menu(user_id))
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text("Локация не найдена!", reply_markup=build_main_menu(user_id))
         return ADMIN_STATE
 
     elif choice == 'remove_pair':
         admin_data = get_admin_data(admin_id)
         if not admin_data['pairs']:
-            await query.edit_message_text("Нет пар для удаления!", reply_markup=build_main_menu(user_id))
+            try:
+                await query.edit_message_text("Нет пар для удаления!", reply_markup=build_main_menu(user_id))
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text("Нет пар для удаления!", reply_markup=build_main_menu(user_id))
             return ADMIN_STATE
         keyboard = [
             [InlineKeyboardButton(pair, callback_data=f'delete_pair_{pair}') for pair in admin_data['pairs'][i:i+2]]
@@ -391,13 +533,27 @@ async def admin_callback(update, context):
         ]
         keyboard.append([InlineKeyboardButton("Назад ⬅️", callback_data='back_to_main')])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Выбери пару для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
+        try:
+            await query.edit_message_text("Выбери пару для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text("Выбери пару для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
         return EDIT_PAIRS
 
     elif choice == 'remove_location':
         admin_data = get_admin_data(admin_id)
         if not admin_data['locations']:
-            await query.edit_message_text("Нет локаций для удаления!", reply_markup=build_main_menu(user_id))
+            try:
+                await query.edit_message_text("Нет локаций для удаления!", reply_markup=build_main_menu(user_id))
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+                else:
+                    logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                    await query.message.reply_text("Нет локаций для удаления!", reply_markup=build_main_menu(user_id))
             return ADMIN_STATE
         keyboard = [
             [InlineKeyboardButton(loc, callback_data=f'delete_location_{loc}') for loc in admin_data['locations'][i:i+2]]
@@ -405,7 +561,14 @@ async def admin_callback(update, context):
         ]
         keyboard.append([InlineKeyboardButton("Назад ⬅️", callback_data='back_to_main')])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Выбери локацию для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
+        try:
+            await query.edit_message_text("Выбери локацию для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text("Выбери локацию для удаления:", reply_markup=reply_markup, parse_mode='Markdown')
         return EDIT_LOCATIONS
 
     logger.warning(f"Неизвестный choice: {choice}")
@@ -457,38 +620,53 @@ async def rates_callback(update, context):
         logger.info(f"Доступные пары в rates: {list(admin_data['rates'].keys())}")
         if rate_key not in admin_data['rates']:
             logger.error(f"Пара {rate_key} не найдена в rates!")
-            await query.message.reply_text(
-                f"Ошибка: пара *{rate_key}* не найдена. Попробуй снова.",
-                reply_markup=build_rates_menu(admin_id),
-                parse_mode='Markdown'
-            )
+            try:
+                await query.message.reply_text(
+                    f"Ошибка: пара *{rate_key}* не найдена. Попробуй снова.",
+                    reply_markup=build_rates_menu(admin_id),
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Ошибка при отправке сообщения об ошибке: {str(e)}")
             return EDIT_RATES
         try:
             context.user_data['editing_rate'] = rate_key
             logger.info(f"Сохранён editing_rate: {context.user_data['editing_rate']}")
-            await query.message.reply_text(
-                f"Введи новый курс для пары *{rate_key}* (например, 0.85):",
-                parse_mode='Markdown'
-            )
-            logger.info(f"Сообщение о вводе курса отправлено для {rate_key}")
+            try:
+                await query.message.reply_text(
+                    f"Введи новый курс для пары *{rate_key}* (например, 0.85):",
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Сообщение о вводе курса отправлено для {rate_key}")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке запроса на ввод курса: {str(e)}")
             return SET_RATE
         except Exception as e:
             logger.error(f"Ошибка при выборе пары {rate_key}: {str(e)}")
-            await query.message.reply_text(
-                "Произошла ошибка при выборе пары. Попробуй снова.",
-                reply_markup=build_main_menu(admin_id)
-            )
+            try:
+                await query.message.reply_text(
+                    "Произошла ошибка при выборе пары. Попробуй снова.",
+                    reply_markup=build_main_menu(admin_id)
+                )
+            except Exception as reply_err:
+                logger.error(f"Ошибка при отправке сообщения об ошибке: {str(reply_err)}")
             return ADMIN_STATE
     elif choice == 'save_rates':
         logger.info("Сохранение курсов")
-        await query.message.reply_text("✅ Курсы сохранены!")
-        reply_markup = build_main_menu(admin_id)
-        await query.message.reply_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
+        try:
+            await query.message.reply_text("✅ Курсы сохранены!")
+            reply_markup = build_main_menu(admin_id)
+            await query.message.reply_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении курсов: {str(e)}")
         return ADMIN_STATE
     elif choice == 'back_to_main':
         logger.info("Возврат в главное меню")
-        reply_markup = build_main_menu(admin_id)
-        await query.message.reply_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
+        try:
+            reply_markup = build_main_menu(admin_id)
+            await query.message.reply_text("Админ-панель: выбери раздел", reply_markup=reply_markup, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Ошибка при возврате в главное меню: {str(e)}")
         return ADMIN_STATE
     logger.warning(f"Неизвестный choice в rates_callback: {choice}")
     return EDIT_RATES
@@ -572,11 +750,22 @@ async def pairs_callback(update, context):
         active_pairs = [str(pair) for pair in admin_data['active_pairs']]
         pairs_text = "Пока не выбрано"
         reply_markup = build_pairs_menu(admin_id)
-        await query.message.edit_text(
-            f"💱 Активные пары: {pairs_text}\nВыбери или обнови:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        try:
+            await query.message.edit_text(
+                f"💱 Активные пары: {pairs_text}\nВыбери или обнови:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text(
+                    f"💱 Активные пары: {pairs_text}\nВыбери или обнови:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
         return EDIT_PAIRS
     elif choice.startswith('toggle_pair_'):
         pair = choice.replace('toggle_pair_', '')
@@ -588,11 +777,22 @@ async def pairs_callback(update, context):
         active_pairs = [str(pair) for pair in admin_data['active_pairs']]
         pairs_text = ", ".join(active_pairs) if active_pairs else "Пока не выбрано"
         reply_markup = build_pairs_menu(admin_id)
-        await query.message.edit_text(
-            f"💱 Активные пары: {pairs_text}\nВыбери или обнови:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        try:
+            await query.message.edit_text(
+                f"💱 Активные пары: {pairs_text}\nВыбери или обнови:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text(
+                    f"💱 Активные пары: {pairs_text}\nВыбери или обнови:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
         return EDIT_PAIRS
     elif choice == 'save_pairs':
         active_pairs = [str(pair) for pair in admin_data['active_pairs']]
@@ -633,11 +833,22 @@ async def locations_callback(update, context):
         active_locations = [str(loc) for loc in admin_data['active_locations']]
         locations_text = "Пока не выбрано"
         reply_markup = build_locations_menu(admin_id)
-        await query.message.edit_text(
-            f"🌍 Активные локации: {locations_text}\nВыбери или обнови:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        try:
+            await query.message.edit_text(
+                f"🌍 Активные локации: {locations_text}\nВыбери или обнови:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text(
+                    f"🌍 Активные локации: {locations_text}\nВыбери или обнови:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
         return EDIT_LOCATIONS
     elif choice.startswith('toggle_loc_'):
         location = choice.replace('toggle_loc_', '')
@@ -649,11 +860,22 @@ async def locations_callback(update, context):
         active_locations = [str(loc) for loc in admin_data['active_locations']]
         locations_text = ", ".join(active_locations) if active_locations else "Пока не выбрано"
         reply_markup = build_locations_menu(admin_id)
-        await query.message.edit_text(
-            f"🌍 Активные локации: {locations_text}\nВыбери или обнови:",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
+        try:
+            await query.message.edit_text(
+                f"🌍 Активные локации: {locations_text}\nВыбери или обнови:",
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                logger.info(f"Сообщение не изменилось для user_id={query.from_user.id}, choice={choice}")
+            else:
+                logger.error(f"Ошибка при редактировании сообщения для user_id={query.from_user.id}: {str(e)}")
+                await query.message.reply_text(
+                    f"🌍 Активные локации: {locations_text}\nВыбери или обнови:",
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
         return EDIT_LOCATIONS
     elif choice == 'save_locations':
         active_locations = [str(loc) for loc in admin_data['active_locations']]
