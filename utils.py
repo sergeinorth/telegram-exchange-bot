@@ -81,36 +81,60 @@ def save_user_data(user_id, active_order, referrer_id=None, in_admin_mode=None):
         if active_order is not None:
             try:
                 active_order_json = json.dumps(active_order)
+                logger.debug(f"Сериализованный active_order для user_id={user_id}: {active_order_json}")
             except TypeError as e:
                 logger.error(f"Ошибка сериализации active_order для user_id={user_id}: {str(e)}, active_order={active_order}")
                 raise
 
+        # Логируем входные данные
+        logger.debug(f"save_user_data: user_id={user_id}, exists={exists}, referrer_id={referrer_id}, in_admin_mode={in_admin_mode}")
+
+        # Упрощаем логику: либо создаем новую запись, либо обновляем существующую
+        # При обновлении, учитываем все переданные параметры
+
         if not exists:
+            # Новый пользователь - создаем запись с переданными данными или дефолтными значениями
             c.execute('INSERT INTO users (user_id, active_order, request_count, referrer_id, in_admin_mode) VALUES (?, ?, ?, ?, ?)',
-                      (user_id, active_order_json, 0, referrer_id if referrer_id is not None else None, in_admin_mode if in_admin_mode is not None else 0))
-            logger.debug(f"Новая запись: user_id={user_id}, active_order={active_order}, referrer_id={referrer_id}, in_admin_mode={in_admin_mode}")
-        elif referrer_id is not None and in_admin_mode is not None:
-            c.execute('INSERT OR REPLACE INTO users (user_id, active_order, request_count, referrer_id, in_admin_mode) VALUES (?, ?, ?, ?, ?)',
-                      (user_id, active_order_json, 0, referrer_id, in_admin_mode))
-            logger.debug(f"Полное обновление: user_id={user_id}, active_order={active_order}, referrer_id={referrer_id}, in_admin_mode={in_admin_mode}")
-        elif referrer_id is not None:
-            c.execute('UPDATE users SET active_order = ?, referrer_id = ? WHERE user_id = ?',
-                      (active_order_json, referrer_id, user_id))
-            logger.debug(f"Обновление с referrer_id: user_id={user_id}, active_order={active_order}, referrer_id={referrer_id}")
-        elif in_admin_mode is not None:
-            c.execute('UPDATE users SET active_order = ?, in_admin_mode = ? WHERE user_id = ?',
-                      (active_order_json, in_admin_mode, user_id))
-            logger.debug(f"Обновление in_admin_mode: user_id={user_id}, active_order={active_order}, in_admin_mode={in_admin_mode}")
+                     (user_id, active_order_json, 0, 
+                      referrer_id if referrer_id is not None else None, 
+                      in_admin_mode if in_admin_mode is not None else 0))
+            logger.debug(f"Создана новая запись пользователя: user_id={user_id}")
         else:
-            c.execute('UPDATE users SET active_order = ? WHERE user_id = ?',
-                      (active_order_json, user_id))
-            logger.debug(f"Обновление active_order: user_id={user_id}, active_order={active_order}")
+            # Существующий пользователь - обновляем только переданные параметры
+            if referrer_id is not None and in_admin_mode is not None:
+                c.execute('UPDATE users SET active_order = ?, referrer_id = ?, in_admin_mode = ? WHERE user_id = ?',
+                         (active_order_json, referrer_id, in_admin_mode, user_id))
+                logger.debug(f"Обновлены все поля: user_id={user_id}, active_order, referrer_id={referrer_id}, in_admin_mode={in_admin_mode}")
+            elif referrer_id is not None:
+                c.execute('UPDATE users SET active_order = ?, referrer_id = ? WHERE user_id = ?',
+                         (active_order_json, referrer_id, user_id))
+                logger.debug(f"Обновлены active_order и referrer_id={referrer_id} для user_id={user_id}")
+            elif in_admin_mode is not None:
+                c.execute('UPDATE users SET active_order = ?, in_admin_mode = ? WHERE user_id = ?',
+                         (active_order_json, in_admin_mode, user_id))
+                logger.debug(f"Обновлены active_order и in_admin_mode={in_admin_mode} для user_id={user_id}")
+            else:
+                c.execute('UPDATE users SET active_order = ? WHERE user_id = ?',
+                         (active_order_json, user_id))
+                logger.debug(f"Обновлен только active_order для user_id={user_id}")
+
         conn.commit()
-        c.execute('SELECT in_admin_mode FROM users WHERE user_id = ?', (user_id,))
+
+        # Проверяем результат сохранения
+        c.execute('SELECT active_order, referrer_id, in_admin_mode FROM users WHERE user_id = ?', (user_id,))
         result = c.fetchone()
-        logger.debug(f"Проверка после сохранения: user_id={user_id}, in_admin_mode в БД={result[0] if result else None}")
+        if result:
+            logger.debug(f"Проверка после сохранения: user_id={user_id}, active_order={result[0]}, referrer_id={result[1]}, in_admin_mode={result[2]}")
+            if in_admin_mode is not None and result[2] != in_admin_mode:
+                logger.warning(f"in_admin_mode не был корректно сохранен: ожидалось {in_admin_mode}, получено {result[2]}")
+                # Повторная попытка обновить in_admin_mode
+                c.execute('UPDATE users SET in_admin_mode = ? WHERE user_id = ?', (in_admin_mode, user_id))
+                conn.commit()
+        else:
+            logger.error(f"После сохранения не удалось найти запись для user_id={user_id}")
+
     except sqlite3.Error as e:
-        logger.error(f"Ошибка при сохранении данных пользователя {user_id}: {e}")
+        logger.error(f"Ошибка SQLite при сохранении данных пользователя {user_id}: {e}")
         raise
     except TypeError as e:
         logger.error(f"Ошибка сериализации в save_user_data для user_id={user_id}: {str(e)}")
